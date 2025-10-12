@@ -87,8 +87,6 @@ services:
       PUID: ${PUID}
       PGID: ${PGID}
       TZ: ${TZ}
-      # Bypasses authentication for requests from any IP (useful in this network setup).
-      WEBUI_BYPASS_AUTH_SUBNETS: 0.0.0.0/0
       # Automatically installs the VueTorrent web UI theme.
       DOCKER_MODS: ghcr.io/vuetorrent/vuetorrent-lsio-mod:latest
     volumes:
