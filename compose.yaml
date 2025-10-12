@@ -22,6 +22,8 @@ services:
     volumes:
       # Stores Gluetun's own configuration files.
       - ${CONFIG_PATH}/gluetun:/gluetun
+      # Mounts the local script into the container (read-only).
+      - ./update-qbittorrent.sh:/tmp/update-port.sh:ro
     # Sets environment variables to configure the service.
     environment:
       # --- VPN Selection ---
@@ -60,15 +62,6 @@ services:
       QBITTORRENT_USER: ${QBITTORRENT_USER}
       QBITTORRENT_PASSWORD: ${QBITTORRENT_PASSWORD}
       SCRIPT_NOTIFY_URL: ${SCRIPT_NOTIFY_URL}
-    # Overrides the container's default startup command. This allows us to run setup tasks
-    # before starting the main program.
-    entrypoint: /bin/sh
-    # This command downloads the update script from GitHub, makes it executable,
-    # and then starts the main Gluetun service.
-    command: -c '
-      wget -qO /tmp/update-port.sh https://raw.githubusercontent.com/rob-paprocki/docker-vpn-qbittorrent/refs/heads/main/update-qbittorrent.sh &&
-      chmod +x /tmp/update-port.sh &&
-      exec /gluetun-entrypoint'
     # Defines a command to check if the container is healthy.
     healthcheck:
       # The command to run. This uses Gluetun's built-in check.
