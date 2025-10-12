@@ -60,58 +60,57 @@ services:
       QBITTORRENT_USER: ${QBITTORRENT_USER}
       QBITTORRENT_PASSWORD: ${QBITTORRENT_PASSWORD}
       SCRIPT_NOTIFY_URL: ${SCRIPT_NOTIFY_URL}
-    # Overrides the container's default startup command. This allows us to run setup tasks
-    # before starting the main program.
-    entrypoint: /bin/sh
-    # This block embeds the update script into the container at startup,
-    # removing the need for an external .sh file. It creates the script, makes it
-    # executable, and then starts the main Gluetun service.
-    command: -c '
-      echo "#!/bin/sh" > /tmp/update-port.sh &&
-      echo "NEW_PORT=\$(cat /tmp/gluetun/forwarded_port)" >> /tmp/update-port.sh &&
-      echo "QBIT_USER=\"$$QBITTORRENT_USER\"" >> /tmp/update-port.sh &&
-      echo "QBIT_PASS=\"$$QBITTORRENT_PASSWORD\"" >> /tmp/update-port.sh &&
-      echo "QBIT_HOST=\"localhost\"" >> /tmp/update-port.sh &&
-      echo "QBIT_PORT=\"$$QBITTORRENT_PORT\"" >> /tmp/update-port.sh &&
-      echo "NOTIFY_URL=\"$$SCRIPT_NOTIFY_URL\"" >> /tmp/update-port.sh &&
-      echo "echo \"➡️ Starting qBittorrent port update...\"" >> /tmp/update-port.sh &&
-      echo "echo \"New port to set: $$NEW_PORT\"" >> /tmp/update-port.sh &&
-      echo "echo \"⌛ Waiting for qBittorrent to become available...\"" >> /tmp/update-port.sh &&
-      echo "WAIT_SECONDS=120" >> /tmp/update-port.sh &&
-      echo "COUNTER=0" >> /tmp/update-port.sh &&
-      echo "while [ $$COUNTER -lt 24 ]; do" >> /tmp/update-port.sh &&
-      echo "    wget -q --spider --timeout=2 \"http://$$QBIT_HOST:$$QBIT_PORT\"" >> /tmp/update-port.sh &&
-      echo "    if [ $$? -eq 0 ]; then" >> /tmp/update-port.sh &&
-      echo "        echo \"✅ qBittorrent is online.\"" >> /tmp/update-port.sh &&
-      echo "        break" >> /tmp/update-port.sh &&
-      echo "    fi" >> /tmp/update-port.sh &&
-      echo "    COUNTER=$$((COUNTER+1))" >> /tmp/update-port.sh &&
-      echo "    sleep 5" >> /tmp/update-port.sh &&
-      echo "done" >> /tmp/update-port.sh &&
-      echo "if [ $$COUNTER -eq 24 ]; then" >> /tmp/update-port.sh &&
-      echo "    echo \"❌ ERROR: qBittorrent did not become available after $${WAIT_SECONDS} seconds.\"" >> /tmp/update-port.sh &&
-      echo "    wget -q -O- --header='\''Content-Type: application/json'\'' --post-data \"{\\\"content\\\":\\\"⚠️ **qBittorrent Startup Error!**\\\\n The script inside Gluetun failed to connect to qBittorrent after $${WAIT_SECONDS} seconds.\\\"}\" \"$$NOTIFY_URL\"" >> /tmp/update-port.sh &&
-      echo "    exit 1" >> /tmp/update-port.sh &&
-      echo "fi" >> /tmp/update-port.sh &&
-      echo "echo \"Logging in to qBittorrent...\"" >> /tmp/update-port.sh &&
-      echo "COOKIE_FILE=\$(mktemp)" >> /tmp/update-port.sh &&
-      echo "LOGIN_RESPONSE=\$(wget -q --save-cookies \"$$COOKIE_FILE\" --keep-session-cookies --post-data \"username=$$QBIT_USER&password=$$QBIT_PASS\" --header \"Referer: http://$$QBIT_HOST:$$QBIT_PORT\" -O - \"http://$$QBIT_HOST:$$QBIT_PORT/api/v2/auth/login\")" >> /tmp/update-port.sh &&
-      echo "if [ \"$$LOGIN_RESPONSE\" != \"Ok.\" ]; then" >> /tmp/update-port.sh &&
-      echo "    echo \"❌ ERROR: Failed to log in to qBittorrent. Check credentials. Response: $$LOGIN_RESPONSE\"" >> /tmp/update-port.sh &&
-      echo "    wget -q -O- --header='\''Content-Type: application/json'\'' --post-data \"{\\\"content\\\":\\\"⚠️ **qBittorrent Login Error!**\\\\n The script inside Gluetun failed to log in. Check credentials.\\\"}\" \"$$NOTIFY_URL\"" >> /tmp/update-port.sh &&
-      echo "    rm \"$$COOKIE_FILE\"" >> /tmp/update-port.sh &&
-      echo "    exit 1" >> /tmp/update-port.sh &&
-      echo "else" >> /tmp/update-port.sh &&
-      echo "    echo \"✅ Successfully logged in to qBittorrent.\"" >> /tmp/update-port.sh &&
-      echo "    wget -q --load-cookies \"$$COOKIE_FILE\" --post-data \"json={\\\"listen_port\\\": $$NEW_PORT}\" -O /dev/null \"http://$$QBIT_HOST:$$QBIT_PORT/api/v2/app/setPreferences\"" >> /tmp/update-port.sh &&
-      echo "    rm \"$$COOKIE_FILE\"" >> /tmp/update-port.sh &&
-      echo "    echo \"✅ qBittorrent listening port update command sent.\"" >> /tmp/update-port.sh &&
-      echo "    wget -q -O- --header='\''Content-Type: application/json'\'' --post-data \"{\\\"content\\\":\\\"✅ **qBittorrent Port Updated!**\\\\nNew forwarded port is: **$${NEW_PORT}**\\\"}\" \"$$NOTIFY_URL\"" >> /tmp/update-port.sh &&
-      echo "fi" >> /tmp/update-port.sh &&
-      echo "echo \"----------------------------------------\"" >> /tmp/update-port.sh &&
-      echo "exit 0" >> /tmp/update-port.sh &&
-      chmod +x /tmp/update-port.sh &&
-      exec /gluetun-entrypoint'
+    # --- THIS BLOCK HAS BEEN CORRECTED TO FIX THE YAML SYNTAX ERROR ---
+    entrypoint:
+      - /bin/sh
+    command:
+      - -c
+      - >
+        echo "#!/bin/sh" > /tmp/update-port.sh &&
+        echo "NEW_PORT=\$(cat /tmp/gluetun/forwarded_port)" >> /tmp/update-port.sh &&
+        echo "QBIT_USER=\"$$QBITTORRENT_USER\"" >> /tmp/update-port.sh &&
+        echo "QBIT_PASS=\"$$QBITTORRENT_PASSWORD\"" >> /tmp/update-port.sh &&
+        echo "QBIT_HOST=\"localhost\"" >> /tmp/update-port.sh &&
+        echo "QBIT_PORT=\"$$QBITTORRENT_PORT\"" >> /tmp/update-port.sh &&
+        echo "NOTIFY_URL=\"$$SCRIPT_NOTIFY_URL\"" >> /tmp/update-port.sh &&
+        echo "echo \"➡️ Starting qBittorrent port update...\"" >> /tmp/update-port.sh &&
+        echo "echo \"New port to set: $$NEW_PORT\"" >> /tmp/update-port.sh &&
+        echo "echo \"⌛ Waiting for qBittorrent to become available...\"" >> /tmp/update-port.sh &&
+        echo "WAIT_SECONDS=120" >> /tmp/update-port.sh &&
+        echo "COUNTER=0" >> /tmp/update-port.sh &&
+        echo "while [ $$COUNTER -lt 24 ]; do" >> /tmp/update-port.sh &&
+        echo "    wget -q --spider --timeout=2 \"http://$$QBIT_HOST:$$QBIT_PORT\"" >> /tmp/update-port.sh &&
+        echo "    if [ $$? -eq 0 ]; then" >> /tmp/update-port.sh &&
+        echo "        echo \"✅ qBittorrent is online.\"" >> /tmp/update-port.sh &&
+        echo "        break" >> /tmp/update-port.sh &&
+        echo "    fi" >> /tmp/update-port.sh &&
+        echo "    COUNTER=$$((COUNTER+1))" >> /tmp/update-port.sh &&
+        echo "    sleep 5" >> /tmp/update-port.sh &&
+        echo "done" >> /tmp/update-port.sh &&
+        echo "if [ $$COUNTER -eq 24 ]; then" >> /tmp/update-port.sh &&
+        echo "    echo \"❌ ERROR: qBittorrent did not become available after $${WAIT_SECONDS} seconds.\"" >> /tmp/update-port.sh &&
+        echo "    wget -q -O- --header='Content-Type: application/json' --post-data \"{\\\"content\\\":\\\"⚠️ **qBittorrent Startup Error!**\\\\n The script inside Gluetun failed to connect to qBittorrent after $${WAIT_SECONDS} seconds.\\\"}\" \"$$NOTIFY_URL\"" >> /tmp/update-port.sh &&
+        echo "    exit 1" >> /tmp/update-port.sh &&
+        echo "fi" >> /tmp/update-port.sh &&
+        echo "echo \"Logging in to qBittorrent...\"" >> /tmp/update-port.sh &&
+        echo "COOKIE_FILE=\$(mktemp)" >> /tmp/update-port.sh &&
+        echo "LOGIN_RESPONSE=\$(wget -q --save-cookies \"$$COOKIE_FILE\" --keep-session-cookies --post-data \"username=$$QBIT_USER&password=$$QBIT_PASS\" --header \"Referer: http://$$QBIT_HOST:$$QBIT_PORT\" -O - \"http://$$QBIT_HOST:$$QBIT_PORT/api/v2/auth/login\")" >> /tmp/update-port.sh &&
+        echo "if [ \"$$LOGIN_RESPONSE\" != \"Ok.\" ]; then" >> /tmp/update-port.sh &&
+        echo "    echo \"❌ ERROR: Failed to log in to qBittorrent. Check credentials. Response: $$LOGIN_RESPONSE\"" >> /tmp/update-port.sh &&
+        echo "    wget -q -O- --header='Content-Type: application/json' --post-data \"{\\\"content\\\":\\\"⚠️ **qBittorrent Login Error!**\\\\n The script inside Gluetun failed to log in. Check credentials.\\\"}\" \"$$NOTIFY_URL\"" >> /tmp/update-port.sh &&
+        echo "    rm \"$$COOKIE_FILE\"" >> /tmp/update-port.sh &&
+        echo "    exit 1" >> /tmp/update-port.sh &&
+        echo "else" >> /tmp/update-port.sh &&
+        echo "    echo \"✅ Successfully logged in to qBittorrent.\"" >> /tmp/update-port.sh &&
+        echo "    wget -q --load-cookies \"$$COOKIE_FILE\" --post-data \"json={\\\"listen_port\\\": $$NEW_PORT}\" -O /dev/null \"http://$$QBIT_HOST:$$QBIT_PORT/api/v2/app/setPreferences\"" >> /tmp/update-port.sh &&
+        echo "    rm \"$$COOKIE_FILE\"" >> /tmp/update-port.sh &&
+        echo "    echo \"✅ qBittorrent listening port update command sent.\"" >> /tmp/update-port.sh &&
+        echo "    wget -q -O- --header='Content-Type: application/json' --post-data \"{\\\"content\\\":\\\"✅ **qBittorrent Port Updated!**\\\\nNew forwarded port is: **$${NEW_PORT}**\\\"}\" \"$$NOTIFY_URL\"" >> /tmp/update-port.sh &&
+        echo "fi" >> /tmp/update-port.sh &&
+        echo "echo \"----------------------------------------\"" >> /tmp/update-port.sh &&
+        echo "exit 0" >> /tmp/update-port.sh &&
+        chmod +x /tmp/update-port.sh &&
+        exec /gluetun-entrypoint
     # Defines a command to check if the container is healthy.
     healthcheck:
       # The command to run. This uses Gluetun's built-in check.
