@@ -12,7 +12,7 @@ It includes automatic port forwarding updates, container updates via Watchtower,
 
 1.  Clone this repository:
     ```bash
-    git clone <your_repo_url>
+    git clone https://github.com/rob-paprocki/docker-vpn-qbittorrent.git
     ```
 2.  Navigate into the project directory:
     ```bash
