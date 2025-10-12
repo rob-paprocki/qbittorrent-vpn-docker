@@ -28,7 +28,9 @@ It includes automatic port forwarding updates, container updates via Watchtower,
     cp .env.example .env
     ```
 5.  Edit the `.env` file and fill in all your personal information (VPN credentials, paths, Discord URLs, etc.).
-
+    ```bash
+    nano .env
+    ```
 6. Make the .sh executable
    ```bash
    chmod +x update-qbittorrent.sh
