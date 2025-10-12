@@ -26,5 +26,5 @@ It includes automatic port forwarding updates, container updates via Watchtower,
 
 5.  Launch the stack:
     ```bash
-    docker-compose up -d
+    docker compose up -d
     ```
