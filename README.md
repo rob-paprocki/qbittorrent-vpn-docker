@@ -24,7 +24,12 @@ It includes automatic port forwarding updates, container updates via Watchtower,
     ```
 4.  Edit the `.env` file and fill in all your personal information (VPN credentials, paths, Discord URLs, etc.).
 
-5.  Launch the stack:
+5. Make the .sh executable
+   ```bash
+   chmod +x update-qbittorrent.sh
+   ```
+
+6.  Launch the stack:
     ```bash
     docker compose up -d
     ```
