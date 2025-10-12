@@ -172,6 +172,8 @@ services:
       - ${DOWNLOADS_PATH}:/srv/downloads
       # Makes your stack's configs folder available to browse at /srv/configs.
       - ${CONFIG_PATH}:/srv/configs
+      # Mounts the entire project directory to /srv/stack.
+      - ./:/srv/stack
     network_mode: service:gluetun
     depends_on:
       gluetun:
