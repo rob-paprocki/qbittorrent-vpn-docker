@@ -1,0 +1,228 @@
+# This is the main block that defines all the containers (services) in your stack.
+services:
+
+  # This service is the VPN gateway for your other applications.
+  gluetun:
+    # Specifies the Docker image to use for the VPN container.
+    image: qmcgaw/gluetun
+    # Grants the container advanced networking capabilities required to create a VPN tunnel.
+    cap_add:
+      - NET_ADMIN
+    # Passes the host's TUN device into the container, which is necessary for the VPN interface.
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    # Exposes ports to the host machine. Since other services use Gluetun's network,
+    # their ports must be opened here.
+    ports:
+      - ${QBIT_WEBUI_PORT}:${QBIT_WEBUI_PORT}/tcp
+      - ${JACKETT_PORT}:${JACKETT_PORT}/tcp
+      - ${FLARESOLVERR_PORT}:${FLARESOLVERR_PORT}/tcp
+      - ${FILEBROWSER_PORT}:80/tcp
+    # Mounts host directories into the container for persistent data.
+    volumes:
+      # Stores Gluetun's own configuration files.
+      - ${CONFIG_PATH}/gluetun:/gluetun
+    # Sets environment variables to configure the service.
+    environment:
+      # --- VPN Selection ---
+      VPN_SERVICE_PROVIDER: ${VPN_PROVIDER}
+      VPN_TYPE: ${VPN_TYPE}
+
+      # --- OpenVPN Credentials (ignored if VPN_TYPE is not openvpn) ---
+      OPENVPN_USER: ${OPENVPN_USER}
+      OPENVPN_PASSWORD: ${OPENVPN_PASSWORD}
+      OPENVPN_PROTOCOL: ${OPENVPN_PROTOCOL}
+
+      # --- WireGuard Credentials (ignored if VPN_TYPE is not wireguard) ---
+      WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
+      WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES}
+
+      # --- Provider-Specific Settings (Gluetun will pick the ones it needs) ---
+      NORDVPN_OPENVPN_USER: ${NORDVPN_OPENVPN_USER}
+      NORDVPN_OPENVPN_PASSWORD: ${NORDVPN_OPENVPN_PASSWORD}
+      NORDVPN_WIREGUARD_PRIVATE_KEY: ${NORDVPN_WIREGUARD_PRIVATE_KEY}
+      NORDVPN_TECHNOLOGY: ${NORDVPN_TECHNOLOGY}
+      NORDVPN_REGION: ${NORDVPN_REGION}
+      MULLVAD_WIREGUARD_PRIVATE_KEY: ${MULLVAD_WIREGUARD_PRIVATE_KEY}
+      MULLVAD_WIREGUARD_ADDRESSES: ${MULLVAD_WIREGUARD_ADDRESSES}
+      MULLVAD_WIREGUARD_PUBLIC_KEY: ${MULLVAD_WIREGUARD_PUBLIC_KEY}
+
+      # --- General VPN Settings ---
+      PORT_FORWARD_ONLY: ${PORT_FORWARD_ONLY}
+      VPN_PORT_FORWARDING: ${VPN_PORT_FORWARDING}
+      SERVER_COUNTRIES: ${SERVER_COUNTRIES}
+      TZ: ${TZ}
+      DISABLE_IPV6: ${DISABLE_IPV6}
+
+      # --- Script Integration ---
+      VPN_PORT_FORWARDING_UP_COMMAND: /tmp/update-port.sh
+      QBITTORRENT_PORT: ${QBIT_WEBUI_PORT}
+      QBITTORRENT_USER: ${QBITTORRENT_USER}
+      QBITTORRENT_PASSWORD: ${QBITTORRENT_PASSWORD}
+      SCRIPT_NOTIFY_URL: ${SCRIPT_NOTIFY_URL}
+    # This block embeds the update script into the container at startup,
+    # removing the need for an external .sh file.
+    command: >
+      sh -c '
+      echo "#!/bin/sh" > /tmp/update-port.sh &&
+      echo "NEW_PORT=\$(cat /tmp/gluetun/forwarded_port)" >> /tmp/update-port.sh &&
+      echo "QBIT_USER=\"$$QBITTORRENT_USER\"" >> /tmp/update-port.sh &&
+      echo "QBIT_PASS=\"$$QBITTORRENT_PASSWORD\"" >> /tmp/update-port.sh &&
+      echo "QBIT_HOST=\"localhost\"" >> /tmp/update-port.sh &&
+      echo "QBIT_PORT=\"$$QBITTORRENT_PORT\"" >> /tmp/update-port.sh &&
+      echo "NOTIFY_URL=\"$$SCRIPT_NOTIFY_URL\"" >> /tmp/update-port.sh &&
+      echo "echo \"➡️ Starting qBittorrent port update...\"" >> /tmp/update-port.sh &&
+      echo "echo \"New port to set: $$NEW_PORT\"" >> /tmp/update-port.sh &&
+      echo "echo \"⌛ Waiting for qBittorrent to become available...\"" >> /tmp/update-port.sh &&
+      echo "WAIT_SECONDS=120" >> /tmp/update-port.sh &&
+      echo "COUNTER=0" >> /tmp/update-port.sh &&
+      echo "while [ $$COUNTER -lt 24 ]; do" >> /tmp/update-port.sh &&
+      echo "    wget -q --spider --timeout=2 \"http://$$QBIT_HOST:$$QBIT_PORT\"" >> /tmp/update-port.sh &&
+      echo "    if [ $$? -eq 0 ]; then" >> /tmp/update-port.sh &&
+      echo "        echo \"✅ qBittorrent is online.\"" >> /tmp/update-port.sh &&
+      echo "        break" >> /tmp/update-port.sh &&
+      echo "    fi" >> /tmp/update-port.sh &&
+      echo "    COUNTER=$$((COUNTER+1))" >> /tmp/update-port.sh &&
+      echo "    sleep 5" >> /tmp/update-port.sh &&
+      echo "done" >> /tmp/update-port.sh &&
+      echo "if [ $$COUNTER -eq 24 ]; then" >> /tmp/update-port.sh &&
+      echo "    echo \"❌ ERROR: qBittorrent did not become available after $${WAIT_SECONDS} seconds.\"" >> /tmp/update-port.sh &&
+      echo "    wget -q -O- --header='Content-Type: application/json' --post-data \"{\\\"content\\\":\\\"⚠️ **qBittorrent Startup Error!**\\\\n The script inside Gluetun failed to connect to qBittorrent after $${WAIT_SECONDS} seconds.\\\"}\" \"$$NOTIFY_URL\"" >> /tmp/update-port.sh &&
+      echo "    exit 1" >> /tmp/update-port.sh &&
+      echo "fi" >> /tmp/update-port.sh &&
+      echo "echo \"Logging in to qBittorrent...\"" >> /tmp/update-port.sh &&
+      echo "COOKIE_FILE=\$(mktemp)" >> /tmp/update-port.sh &&
+      echo "LOGIN_RESPONSE=\$(wget -q --save-cookies \"$$COOKIE_FILE\" --keep-session-cookies --post-data \"username=$$QBIT_USER&password=$$QBIT_PASS\" --header \"Referer: http://$$QBIT_HOST:$$QBIT_PORT\" -O - \"http://$$QBIT_HOST:$$QBIT_PORT/api/v2/auth/login\")" >> /tmp/update-port.sh &&
+      echo "if [ \"$$LOGIN_RESPONSE\" != \"Ok.\" ]; then" >> /tmp/update-port.sh &&
+      echo "    echo \"❌ ERROR: Failed to log in to qBittorrent. Check credentials. Response: $$LOGIN_RESPONSE\"" >> /tmp/update-port.sh &&
+      echo "    wget -q -O- --header='Content-Type: application/json' --post-data \"{\\\"content\\\":\\\"⚠️ **qBittorrent Login Error!**\\\\n The script inside Gluetun failed to log in. Check credentials.\\\"}\" \"$$NOTIFY_URL\"" >> /tmp/update-port.sh &&
+      echo "    rm \"$$COOKIE_FILE\"" >> /tmp/update-port.sh &&
+      echo "    exit 1" >> /tmp/update-port.sh &&
+      echo "else" >> /tmp/update-port.sh &&
+      echo "    echo \"✅ Successfully logged in to qBittorrent.\"" >> /tmp/update-port.sh &&
+      echo "    wget -q --load-cookies \"$$COOKIE_FILE\" --post-data \"json={\\\"listen_port\\\": $$NEW_PORT}\" -O /dev/null \"http://$$QBIT_HOST:$$QBIT_PORT/api/v2/app/setPreferences\"" >> /tmp/update-port.sh &&
+      echo "    rm \"$$COOKIE_FILE\"" >> /tmp/update-port.sh &&
+      echo "    echo \"✅ qBittorrent listening port update command sent.\"" >> /tmp/update-port.sh &&
+      echo "    wget -q -O- --header='Content-Type: application/json' --post-data \"{\\\"content\\\":\\\"✅ **qBittorrent Port Updated!**\\\\nNew forwarded port is: **$${NEW_PORT}**\\\"}\" \"$$NOTIFY_URL\"" >> /tmp/update-port.sh &&
+      echo "fi" >> /tmp/update-port.sh &&
+      echo "echo \"----------------------------------------\"" >> /tmp/update-port.sh &&
+      echo "exit 0" >> /tmp/update-port.sh &&
+      chmod +x /tmp/update-port.sh &&
+      /gluetun-entrypoint'
+    # Defines a command to check if the container is healthy.
+    healthcheck:
+      # The command to run. This uses Gluetun's built-in check.
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      # How often to run the check.
+      interval: 1m30s
+      # How long to wait for the command to return a result.
+      timeout: 10s
+      # How many consecutive failures before the container is marked "unhealthy".
+      retries: 3
+      # A grace period after startup before checks are enforced.
+      start_period: 60s
+    # Ensures the container restarts automatically unless you manually stop it.
+    restart: unless-stopped
+    # A label used by Watchtower to identify this container as part of the managed scope.
+    labels:
+      - "com.centurylinklabs.watchtower.scope=torrent-stack"
+
+  # This service solves Cloudflare challenges for other applications.
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    environment:
+      TZ: ${TZ}
+      LOG_LEVEL: info
+    volumes:
+      - ${CONFIG_PATH}/flaresolverr:/config
+    # Forces this container to use Gluetun's network stack, routing all traffic through the VPN.
+    network_mode: service:gluetun
+    # Prevents this container from starting until the 'gluetun' service is 'healthy'.
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.scope=torrent-stack"
+
+  # The qBittorrent client.
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    network_mode: service:gluetun
+    environment:
+      WEBUI_PORT: ${QBIT_WEBUI_PORT}
+      # Sets the user and group ID for file permissions.
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+      # Bypasses authentication for requests from any IP (useful in this network setup).
+      WEBUI_BYPASS_AUTH_SUBNETS: 0.0.0.0/0
+      # Automatically installs the VueTorrent web UI theme.
+      DOCKER_MODS: ghcr.io/vuetorrent/vuetorrent-lsio-mod:latest
+    volumes:
+      - ${CONFIG_PATH}/qbittorrent:/config
+      - ${DOWNLOADS_PATH}:/downloads
+      - ${INCOMPLETE_DOWNLOADS}:/downloads/incomplete
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.scope=torrent-stack"
+  
+  # The Jackett indexer proxy.
+  jackett:
+    image: lscr.io/linuxserver/jackett:latest
+    environment:
+      PUID: ${PUID}
+      PGID: ${PGID}
+      TZ: ${TZ}
+    volumes:
+      - ${CONFIG_PATH}/jackett:/config
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.scope=torrent-stack"
+
+  # This service automatically updates your other containers to the latest image.
+  watchtower:
+    image: containrrr/watchtower
+    # Gives Watchtower access to the Docker daemon to manage other containers.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Configures notifications, timezone, scope, and scheduling.
+    environment:
+      WATCHTOWER_NOTIFICATION_URL: ${WATCHTOWER_NOTIFICATION_URL}
+      WATCHTOWER_NOTIFICATION_LEVEL: ${WATCHTOWER_NOTIFICATION_LEVEL}
+      WATCHTOWER_NOTIFICATION_TITLE_TAG: ${WATCHTOWER_NOTIFICATION_TITLE_TAG}
+      TZ: ${TZ}
+      WATCHTOWER_SCOPE: torrent-stack
+      WATCHTOWER_SCHEDULE: ${WATCHTOWER_SCHEDULE}
+    # Command-line flags for Watchtower. --cleanup removes old images.
+    command: --cleanup
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.scope=torrent-stack"
+
+  # This service provides a web-based file manager.
+  filebrowser:
+    image: ghcr.io/gtsteffaniak/filebrowser
+    environment:
+      TZ: ${TZ}
+    volumes:
+      # Stores File Browser's own configuration.
+      - ${CONFIG_PATH}/filebrowser:/config
+      # Makes your downloads folder available to browse at /srv/downloads.
+      - ${DOWNLOADS_PATH}:/srv/downloads
+      # Makes your stack's configs folder available to browse at /srv/configs.
+      - ${CONFIG_PATH}:/srv/configs
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.scope=torrent-stack"
