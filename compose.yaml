@@ -11,93 +11,41 @@ services:
     # Passes the host's TUN device into the container, which is necessary for the VPN interface.
     devices:
       - /dev/net/tun:/dev/net/tun
-    # Exposes ports to the host machine. Since other services use Gluetun's network,
-    # their ports must be opened here.
+    # Exposes ports to the host machine for services running behind the VPN.
     ports:
       - ${QBIT_WEBUI_PORT}:${QBIT_WEBUI_PORT}/tcp
       - ${JACKETT_PORT}:${JACKETT_PORT}/tcp
       - ${FLARESOLVERR_PORT}:${FLARESOLVERR_PORT}/tcp
-      - ${FILEBROWSER_PORT}:80/tcp
     # Mounts host directories into the container for persistent data.
     volumes:
       # Stores Gluetun's own configuration files.
       - ${CONFIG_PATH}/gluetun:/gluetun
+      # Mounts the local script into the container (read-only).
+      - ./update-qbittorrent.sh:/gluetun/update-qbittorrent.sh:ro
     # Sets environment variables to configure the service.
     environment:
       # --- VPN Selection ---
       VPN_SERVICE_PROVIDER: ${VPN_PROVIDER}
       VPN_TYPE: ${VPN_TYPE}
-
-      # --- OpenVPN Credentials (ignored if VPN_TYPE is not openvpn) ---
+      # --- OpenVPN Credentials ---
       OPENVPN_USER: ${OPENVPN_USER}
       OPENVPN_PASSWORD: ${OPENVPN_PASSWORD}
       OPENVPN_PROTOCOL: ${OPENVPN_PROTOCOL}
-
-      # --- WireGuard Credentials (ignored if VPN_TYPE is not wireguard) ---
+      # --- WireGuard Credentials ---
       WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
       WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES}
-
       # --- General VPN Settings ---
       PORT_FORWARD_ONLY: ${PORT_FORWARD_ONLY}
       VPN_PORT_FORWARDING: ${VPN_PORT_FORWARDING}
       SERVER_COUNTRIES: ${SERVER_COUNTRIES}
       TZ: ${TZ}
       DISABLE_IPV6: ${DISABLE_IPV6}
-
       # --- Script Integration ---
-      VPN_PORT_FORWARDING_UP_COMMAND: /gluetun/update-port.sh
+      VPN_PORT_FORWARDING_UP_COMMAND: /gluetun/update-qbittorrent.sh
       QBIT_WEBUI_PORT: ${QBIT_WEBUI_PORT}
       QBITTORRENT_USER: ${QBITTORRENT_USER}
       QBITTORRENT_PASSWORD: ${QBITTORRENT_PASSWORD}
       SCRIPT_NOTIFY_URL: ${SCRIPT_NOTIFY_URL}
-    # Overrides the container's default startup command.
-    entrypoint: /bin/sh
-    # This block embeds the update script into the container at startup.
-    command: -c '
-      echo "#!/bin/sh" > /gluetun/update-port.sh &&
-      echo "NEW_PORT=\$(cat /tmp/gluetun/forwarded_port)" >> /gluetun/update-port.sh &&
-      echo "QBIT_USER=\"$$QBITTORRENT_USER\"" >> /gluetun/update-port.sh &&
-      echo "QBIT_PASS=\"$$QBITTORRENT_PASSWORD\"" >> /gluetun/update-port.sh &&
-      echo "QBIT_HOST=\"localhost\"" >> /gluetun/update-port.sh &&
-      echo "QBIT_PORT=\"$$QBIT_WEBUI_PORT\"" >> /gluetun/update-port.sh &&
-      echo "NOTIFY_URL=\"$$SCRIPT_NOTIFY_URL\"" >> /gluetun/update-port.sh &&
-      echo "echo \"➡️ Starting qBittorrent port update...\"" >> /gluetun/update-port.sh &&
-      echo "echo \"New port to set: $$NEW_PORT\"" >> /gluetun/update-port.sh &&
-      echo "echo \"⌛ Waiting for qBittorrent to become available...\"" >> /gluetun/update-port.sh &&
-      echo "COUNTER=0" >> /gluetun/update-port.sh &&
-      echo "while [ $$COUNTER -lt 24 ]; do" >> /gluetun/update-port.sh &&
-      echo "    wget -q --spider --timeout=2 \"http://$$QBIT_HOST:$$QBIT_PORT\"" >> /gluetun/update-port.sh &&
-      echo "    if [ $$? -eq 0 ]; then" >> /gluetun/update-port.sh &&
-      echo "        echo \"✅ qBittorrent is online.\"" >> /gluetun/update-port.sh &&
-      echo "        break" >> /gluetun/update-port.sh &&
-      echo "    fi" >> /gluetun/update-port.sh &&
-      echo "    COUNTER=\$(expr \$$COUNTER + 1)" >> /gluetun/update-port.sh &&
-      echo "    sleep 5" >> /gluetun/update-port.sh &&
-      echo "done" >> /gluetun/update-port.sh &&
-      echo "if [ $$COUNTER -eq 24 ]; then" >> /gluetun/update-port.sh &&
-      echo "    echo \"❌ ERROR: qBittorrent did not become available after 120 seconds.\"" >> /gluetun/update-port.sh &&
-      echo "    wget -q -O- --header='\''Content-Type: application/json'\'' --post-data \"{\\\"content\\\":\\\"⚠️ **qBittorrent Startup Error!**\\\\n The script inside Gluetun failed to connect to qBittorrent after 120 seconds.\\\"}\" \"$$NOTIFY_URL\"" >> /gluetun/update-port.sh &&
-      echo "    exit 1" >> /gluetun/update-port.sh &&
-      echo "fi" >> /gluetun/update-port.sh &&
-      echo "echo \"Logging in to qBittorrent...\"" >> /gluetun/update-port.sh &&
-      echo "COOKIE_FILE=\$(mktemp)" >> /gluetun/update-port.sh &&
-      echo "LOGIN_RESPONSE=\$(wget -q --save-cookies \"$$COOKIE_FILE\" --keep-session-cookies --post-data \"username=$$QBIT_USER&password=$$QBIT_PASS\" --header \"Referer: http://$$QBIT_HOST:$$QBIT_PORT\" -O - \"http://$$QBIT_HOST:$$QBIT_PORT/api/v2/auth/login\")" >> /gluetun/update-port.sh &&
-      echo "if [ \"$$LOGIN_RESPONSE\" != \"Ok.\" ]; then" >> /gluetun/update-port.sh &&
-      echo "    echo \"❌ ERROR: Failed to log in to qBittorrent. Check credentials. Response: $$LOGIN_RESPONSE\"" >> /gluetun/update-port.sh &&
-      echo "    wget -q -O- --header='\''Content-Type: application/json'\'' --post-data \"{\\\"content\\\":\\\"⚠️ **qBittorrent Login Error!**\\\\n The script inside Gluetun failed to log in. Check credentials.\\\"}\" \"$$NOTIFY_URL\"" >> /gluetun/update-port.sh &&
-      echo "    rm \"$$COOKIE_FILE\"" >> /gluetun/update-port.sh &&
-      echo "    exit 1" >> /gluetun/update-port.sh &&
-      echo "else" >> /gluetun/update-port.sh &&
-      echo "    echo \"✅ Successfully logged in to qBittorrent.\"" >> /gluetun/update-port.sh &&
-      echo "    wget -q --load-cookies \"$$COOKIE_FILE\" --post-data \"json={\\\"listen_port\\\": $$NEW_PORT}\" -O /dev/null \"http://$$QBIT_HOST:$$QBIT_PORT/api/v2/app/setPreferences\"" >> /gluetun/update-port.sh &&
-      echo "    rm \"$$COOKIE_FILE\"" >> /gluetun/update-port.sh &&
-      echo "    echo \"✅ qBittorrent listening port update command sent.\"" >> /gluetun/update-port.sh &&
-      echo "    wget -q -O- --header='\''Content-Type: application/json'\'' --post-data \"{\\\"content\\\":\\\"✅ **qBittorrent Port Updated!**\\\\nNew forwarded port is: **$${NEW_PORT}**\\\"}\" \"$$NOTIFY_URL\"" >> /gluetun/update-port.sh &&
-      echo "fi" >> /gluetun/update-port.sh &&
-      echo "echo \"----------------------------------------\"" >> /gluetun/update-port.sh &&
-      echo "exit 0" >> /gluetun/update-port.sh &&
-      chmod +x /gluetun/update-port.sh &&
-      exec /gluetun-entrypoint'
     # Defines a command to check if the container is healthy.
     healthcheck:
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
@@ -196,6 +144,8 @@ services:
     image: ghcr.io/gtsteffaniak/filebrowser
     environment:
       TZ: ${TZ}
+    ports:
+      - ${FILEBROWSER_PORT}:80/tcp
     volumes:
       # Stores File Browser's own configuration.
       - ${CONFIG_PATH}/filebrowser:/config
@@ -205,10 +155,6 @@ services:
       - ${CONFIG_PATH}:/srv/configs
       # Mounts the entire project directory to /srv/stack.
       - ./:/srv/stack
-    network_mode: service:gluetun
-    depends_on:
-      gluetun:
-        condition: service_healthy
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.scope=torrent-stack"
