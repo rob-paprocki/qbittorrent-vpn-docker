@@ -10,26 +10,31 @@ It includes automatic port forwarding updates, container updates via Watchtower,
 
 ## Setup
 
-1.  Clone this repository:
+1.  Create directory that stores your stacks
+    ```bash
+    mkdir -p /opt/stacks
+    cd /opt/stacks
+    ```
+2.  Clone this repository:
     ```bash
     git clone https://github.com/rob-paprocki/docker-vpn-qbittorrent.git
     ```
-2.  Navigate into the project directory:
+3.  Navigate into the project directory:
     ```bash
-    cd <your_project_folder>
+    cd docker-vpn-qbittorrent
     ```
-3.  Create your own environment file from the example:
+4.  Create your own environment file from the example:
     ```bash
     cp .env.example .env
     ```
-4.  Edit the `.env` file and fill in all your personal information (VPN credentials, paths, Discord URLs, etc.).
+5.  Edit the `.env` file and fill in all your personal information (VPN credentials, paths, Discord URLs, etc.).
 
-5. Make the .sh executable
+6. Make the .sh executable
    ```bash
    chmod +x update-qbittorrent.sh
    ```
 
-6.  Launch the stack:
+7.  Launch the stack:
     ```bash
     docker compose up -d
     ```
