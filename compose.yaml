@@ -11,13 +11,12 @@ services:
     # Passes the host's TUN device into the container, which is necessary for the VPN interface.
     devices:
       - /dev/net/tun:/dev/net/tun
-    # Exposes ports to the host machine. Since other services use Gluetun's network,
-    # their ports must be opened here.
+    # Exposes ports to the host machine for services running behind the VPN.
     ports:
       - ${QBIT_WEBUI_PORT}:${QBIT_WEBUI_PORT}/tcp
       - ${JACKETT_PORT}:${JACKETT_PORT}/tcp
       - ${FLARESOLVERR_PORT}:${FLARESOLVERR_PORT}/tcp
-      - ${FILEBROWSER_PORT}:80/tcp
+      # File Browser port removed from here
     # Mounts host directories into the container for persistent data.
     volumes:
       # Stores Gluetun's own configuration files.
@@ -29,33 +28,19 @@ services:
       # --- VPN Selection ---
       VPN_SERVICE_PROVIDER: ${VPN_PROVIDER}
       VPN_TYPE: ${VPN_TYPE}
-
       # --- OpenVPN Credentials (ignored if VPN_TYPE is not openvpn) ---
       OPENVPN_USER: ${OPENVPN_USER}
       OPENVPN_PASSWORD: ${OPENVPN_PASSWORD}
       OPENVPN_PROTOCOL: ${OPENVPN_PROTOCOL}
-
       # --- WireGuard Credentials (ignored if VPN_TYPE is not wireguard) ---
       WIREGUARD_PRIVATE_KEY: ${WIREGUARD_PRIVATE_KEY}
       WIREGUARD_ADDRESSES: ${WIREGUARD_ADDRESSES}
-
-      # --- Provider-Specific Settings (Gluetun will pick the ones it needs) ---
-      NORDVPN_OPENVPN_USER: ${NORDVPN_OPENVPN_USER}
-      NORDVPN_OPENVPN_PASSWORD: ${NORDVPN_OPENVPN_PASSWORD}
-      NORDVPN_WIREGUARD_PRIVATE_KEY: ${NORDVPN_WIREGUARD_PRIVATE_KEY}
-      NORDVPN_TECHNOLOGY: ${NORDVPN_TECHNOLOGY}
-      NORDVPN_REGION: ${NORDVPN_REGION}
-      MULLVAD_WIREGUARD_PRIVATE_KEY: ${MULLVAD_WIREGUARD_PRIVATE_KEY}
-      MULLVAD_WIREGUARD_ADDRESSES: ${MULLVAD_WIREGUARD_ADDRESSES}
-      MULLVAD_WIREGUARD_PUBLIC_KEY: ${MULLVAD_WIREGUARD_PUBLIC_KEY}
-
       # --- General VPN Settings ---
       PORT_FORWARD_ONLY: ${PORT_FORWARD_ONLY}
       VPN_PORT_FORWARDING: ${VPN_PORT_FORWARDING}
       SERVER_COUNTRIES: ${SERVER_COUNTRIES}
       TZ: ${TZ}
       DISABLE_IPV6: ${DISABLE_IPV6}
-
       # --- Script Integration ---
       VPN_PORT_FORWARDING_UP_COMMAND: /tmp/update-port.sh
       QBIT_WEBUI_PORT: ${QBIT_WEBUI_PORT}
@@ -64,15 +49,10 @@ services:
       SCRIPT_NOTIFY_URL: ${SCRIPT_NOTIFY_URL}
     # Defines a command to check if the container is healthy.
     healthcheck:
-      # The command to run. This uses Gluetun's built-in check.
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
-      # How often to run the check.
       interval: 1m30s
-      # How long to wait for the command to return a result.
       timeout: 10s
-      # How many consecutive failures before the container is marked "unhealthy".
       retries: 3
-      # A grace period after startup before checks are enforced.
       start_period: 60s
     # Ensures the container restarts automatically unless you manually stop it.
     restart: unless-stopped
@@ -165,6 +145,11 @@ services:
     image: ghcr.io/gtsteffaniak/filebrowser
     environment:
       TZ: ${TZ}
+    # --- CHANGES START HERE ---
+    ports:
+      - ${FILEBROWSER_PORT}:80/tcp
+    # 'network_mode' and 'depends_on' removed to make it independent.
+    # --- CHANGES END HERE ---
     volumes:
       # Stores File Browser's own configuration.
       - ${CONFIG_PATH}/filebrowser:/config
@@ -174,10 +159,6 @@ services:
       - ${CONFIG_PATH}:/srv/configs
       # Mounts the entire project directory to /srv/stack.
       - ./:/srv/stack
-    network_mode: service:gluetun
-    depends_on:
-      gluetun:
-        condition: service_healthy
     restart: unless-stopped
     labels:
       - "com.centurylinklabs.watchtower.scope=torrent-stack"
