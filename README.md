@@ -44,4 +44,5 @@ It includes automatic port forwarding updates, container updates via Watchtower,
 
 Filebrowser credentials are admin/admin
 
-Follow steps [here](https://github.com/qbittorrent/search-plugins/wiki/How-to-configure-Jackett-plugin) for setup of Jackett
+Follow steps [here](https://github.com/qbittorrent/search-plugins/wiki/How-to-configure-Jackett-plugin) for setup of Jackett,
+    TL;DR Go to ./configs/qbittorrent/qBittorrent/nova3/engines/jackett.json and paste your API key
