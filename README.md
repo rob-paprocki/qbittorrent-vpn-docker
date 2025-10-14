@@ -40,3 +40,8 @@ It includes automatic port forwarding updates, container updates via Watchtower,
     ```bash
     docker compose up -d
     ```
+## Post-Install
+
+Filebrowser credentials are admin/admin
+
+Follow steps [here](https://github.com/qbittorrent/search-plugins/wiki/How-to-configure-Jackett-plugin) for setup of Jackett
