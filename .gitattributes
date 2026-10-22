@@ -1,0 +1,10 @@
+# Force LF everywhere so shell scripts stay runnable regardless of each
+# contributor's core.autocrlf setting on Windows.
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.conf  text eol=lf
+*.md    text eol=lf

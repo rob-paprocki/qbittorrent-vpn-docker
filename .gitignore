@@ -1,0 +1,33 @@
+# Secrets (VPN keys, qBit password, webhooks).
+.env
+.env.*
+!.env.example
+
+# Download trees.
+/downloads/
+/incomplete/
+
+# Everything under configs/ is runtime state the apps rewrite — only the two
+# tracked seeds are allowed through. Jackett rewrites ServerConfig.json with
+# its APIKey on first start; the tracked file remains the seed template and
+# the live one must stay out of git. Run:
+#   git update-index --skip-worktree configs/jackett/Jackett/ServerConfig.json
+# after the stack is up to stop future `git status` noise on the generated APIKey.
+/configs/*
+!/configs/jackett/
+!/configs/qbittorrent/
+/configs/jackett/*
+!/configs/jackett/Jackett/
+/configs/jackett/Jackett/*
+!/configs/jackett/Jackett/ServerConfig.json
+/configs/qbittorrent/*
+!/configs/qbittorrent/qBittorrent/
+/configs/qbittorrent/qBittorrent/*
+!/configs/qbittorrent/qBittorrent/qBittorrent.conf
+
+# Editor / OS cruft.
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

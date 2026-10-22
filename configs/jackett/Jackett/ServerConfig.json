@@ -1,6 +1,6 @@
 {
   "Port": 9117,
-  "LocalBindAddress": "127.0.0.1",
+  "LocalBindAddress": "*",
   "FlareSolverrUrl": "http://127.0.0.1:8191",
-  "FlareSolverrMaxTimeout": 55000,
+  "FlareSolverrMaxTimeout": 55000
 }
