@@ -40,6 +40,15 @@ docker compose up -d
 
 If the host is the Docker VM produced by [docker-pve](https://github.com/rob-paprocki/docker-pve), clone into `/opt/stacks/` as above and Dockge (at `http://<host>:5001`) will auto-discover `torrent-stack`. Edit `.env` and start the stack from the Dockge UI — no CLI needed after the clone.
 
+### Upgrading from a pre-`name: torrent-stack` deployment
+
+The compose file now declares `name: torrent-stack`. Earlier versions let Docker Compose derive the project name from the parent directory (`qbittorrent-vpn-docker` or `docker-vpn-qbittorrent`). If you are upgrading in place, bring the old project down under its old name first, then up under the new one so Docker doesn't leave orphaned containers:
+
+```bash
+docker compose -p qbittorrent-vpn-docker down   # or -p docker-vpn-qbittorrent, whichever you had
+docker compose up -d
+```
+
 ## Post-install
 
 ### FileBrowser
