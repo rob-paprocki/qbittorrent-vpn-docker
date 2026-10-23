@@ -86,7 +86,6 @@ TL;DR after the stack is up:
 
 * **Image tags.** `qbittorrent` and `jackett` are LinuxServer images; their tag convention is `<upstream>_v<libtorrent>-ls<build>` with a rolling `:latest`. This repo leaves them on `:latest` and lets Watchtower pull nightly. Pin the tag in `compose.yaml` if reproducibility matters more than auto-update.
 * **Watchtower is archived.** `containrrr/watchtower` was archived on 2025-12-17. It still works and this stack pins `v1.7.1`, but consider replacing it with a maintained fork (e.g. `nickfedor/watchtower`) or switching to notify-only tooling (`diun`, `renovate`) in a future revision.
-* **Prowlarr.** Jackett is included for compatibility. If you plan to add Sonarr/Radarr later, consider [Prowlarr](https://wiki.servarr.com/prowlarr) instead — it supersedes Jackett for new deployments and integrates natively with the \*arr stack.
 * **IPv6.** Disabled via a Docker sysctl on the gluetun service (`net.ipv6.conf.all.disable_ipv6=1`), which propagates to every container on `network_mode: service:gluetun`. The host's IPv6 is untouched.
 
 ## License
