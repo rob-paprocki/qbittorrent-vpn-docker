@@ -1,56 +1,69 @@
 #!/bin/sh
 
-# This script is executed by Gluetun automatically.
+# Invoked by Gluetun whenever a new forwarded VPN port is assigned.
+# Reads the port, logs in to qBittorrent, pushes the port into qBittorrent's
+# preferences, and reports the outcome to a Discord webhook.
 
-# Read the new port directly from the file Gluetun creates
-NEW_PORT=$(cat /tmp/gluetun/forwarded_port)
+set -u
 
-# These are passed in from the compose file's environment section
-QBIT_USER="$QBITTORRENT_USER"
-QBIT_PASS="$QBITTORRENT_PASSWORD"
 QBIT_HOST="localhost"
 QBIT_PORT="$QBIT_WEBUI_PORT"
+QBIT_USER="$QBITTORRENT_USER"
+QBIT_PASS="$QBITTORRENT_PASSWORD"
 NOTIFY_URL="$SCRIPT_NOTIFY_URL"
 
-echo "➡️ Starting qBittorrent port update..."
+NEW_PORT=$(cat /tmp/gluetun/forwarded_port 2>/dev/null || true)
+case "$NEW_PORT" in
+    ''|*[!0-9]*)
+        echo "ERROR: invalid or empty forwarded port: '$NEW_PORT'" >&2
+        exit 1
+        ;;
+esac
+if [ "$NEW_PORT" -lt 1 ] || [ "$NEW_PORT" -gt 65535 ]; then
+    echo "ERROR: forwarded port out of range: $NEW_PORT" >&2
+    exit 1
+fi
+
+echo "Starting qBittorrent port update."
 echo "New port to set: $NEW_PORT"
 
-# Wait for qBittorrent Web UI to be responsive
-echo "⌛ Waiting for qBittorrent to become available..."
+echo "Waiting for qBittorrent to become available..."
 COUNTER=0
-while [ $COUNTER -lt 24 ]; do # Loop for 120 seconds (24 * 5s)
-    wget -q --spider --timeout=2 "http://$QBIT_HOST:$QBIT_PORT"
-    if [ $? -eq 0 ]; then
-        echo "✅ qBittorrent is online."
+while [ "$COUNTER" -lt 24 ]; do # 24 * 5s = 120s
+    if wget -q --spider --timeout=2 "http://$QBIT_HOST:$QBIT_PORT"; then
+        echo "qBittorrent is online."
         break
     fi
-    COUNTER=$(expr $COUNTER + 1)
+    COUNTER=$((COUNTER + 1))
     sleep 5
 done
 
-if [ $COUNTER -eq 24 ]; then
-    echo "❌ ERROR: qBittorrent did not become available after 120 seconds."
-    wget -q -O- --header='Content-Type: application/json' --post-data "{\"content\":\"⚠️ **qBittorrent Startup Error!**\\n The script inside Gluetun failed to connect to qBittorrent after 120 seconds.\"}" "$NOTIFY_URL"
+if [ "$COUNTER" -eq 24 ]; then
+    echo "ERROR: qBittorrent did not become available after 120 seconds." >&2
+    wget -q -O- --header='Content-Type: application/json' --post-data '{"content":"qBittorrent Startup Error: the Gluetun port-update script could not reach qBittorrent after 120 seconds."}' "$NOTIFY_URL"
     exit 1
 fi
 
-# Log in to qBittorrent and update the port
-echo "Logging in to qBittorrent..."
 COOKIE_FILE=$(mktemp)
-LOGIN_RESPONSE=$(wget -q --save-cookies "$COOKIE_FILE" --keep-session-cookies --post-data "username=$QBIT_USER&password=$QBIT_PASS" --header "Referer: http://$QBIT_HOST:$QBIT_PORT" -O - "http://$QBIT_HOST:$QBIT_PORT/api/v2/auth/login")
+trap 'rm -f "$COOKIE_FILE"' EXIT HUP INT TERM
+
+echo "Logging in to qBittorrent..."
+LOGIN_RESPONSE=$(wget -q --save-cookies "$COOKIE_FILE" --keep-session-cookies \
+    --post-data "username=$QBIT_USER&password=$QBIT_PASS" \
+    --header "Referer: http://$QBIT_HOST:$QBIT_PORT" \
+    -O - "http://$QBIT_HOST:$QBIT_PORT/api/v2/auth/login")
 
 if [ "$LOGIN_RESPONSE" != "Ok." ]; then
-    echo "❌ ERROR: Failed to log in to qBittorrent. Check credentials. Response: $LOGIN_RESPONSE"
-    wget -q -O- --header='Content-Type: application/json' --post-data "{\"content\":\"⚠️ **qBittorrent Login Error!**\\n The script inside Gluetun failed to log in. Check credentials.\"}" "$NOTIFY_URL"
-    rm "$COOKIE_FILE"
+    echo "ERROR: failed to log in to qBittorrent. Response: $LOGIN_RESPONSE" >&2
+    wget -q -O- --header='Content-Type: application/json' --post-data '{"content":"qBittorrent Login Error: the Gluetun port-update script could not log in. Check QBITTORRENT_USER/QBITTORRENT_PASSWORD."}' "$NOTIFY_URL"
     exit 1
-else
-    echo "✅ Successfully logged in to qBittorrent."
-    wget -q --load-cookies "$COOKIE_FILE" --post-data "json={\"listen_port\": $NEW_PORT}" -O /dev/null "http://$QBIT_HOST:$QBIT_PORT/api/v2/app/setPreferences"
-    rm "$COOKIE_FILE"
-    echo "✅ qBittorrent listening port update command sent."
-    wget -q -O- --header='Content-Type: application/json' --post-data "{\"content\":\"✅ **qBittorrent Port Updated!**\\nNew forwarded port is: **$NEW_PORT**\"}" "$NOTIFY_URL"
 fi
 
+echo "Logged in. Setting listen_port=$NEW_PORT ..."
+wget -q --load-cookies "$COOKIE_FILE" \
+    --post-data "json={\"listen_port\": $NEW_PORT}" \
+    -O /dev/null "http://$QBIT_HOST:$QBIT_PORT/api/v2/app/setPreferences"
+echo "qBittorrent listening port updated."
+wget -q -O- --header='Content-Type: application/json' --post-data "{\"content\":\"qBittorrent port updated. New forwarded port: $NEW_PORT.\"}" "$NOTIFY_URL"
 echo "----------------------------------------"
 exit 0

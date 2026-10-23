@@ -1,0 +1,53 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          severity: warning
+          scandir: '.'
+
+  compose-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose with .env.example
+        run: |
+          cp .env.example .env
+          docker compose config -q
+      - name: Check env <-> compose symmetry
+        run: |
+          python3 - <<'PY'
+          import re, pathlib, sys
+          compose = pathlib.Path('compose.yaml').read_text()
+          env = pathlib.Path('.env.example').read_text()
+          refs = set(re.findall(r'\$\{([A-Z_][A-Z0-9_]*)\}', compose))
+          defs = set()
+          for line in env.splitlines():
+              line = line.strip()
+              if not line or line.startswith('#'): continue
+              if '=' in line:
+                  defs.add(line.split('=', 1)[0])
+          missing = refs - defs
+          unused = defs - refs
+          if missing: print(f"referenced in compose but missing from .env.example: {sorted(missing)}"); sys.exit(1)
+          if unused: print(f"defined in .env.example but unused in compose: {sorted(unused)}"); sys.exit(1)
+          print("env <-> compose symmetric")
+          PY
+
+  json-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate ServerConfig.json
+        run: python3 -c "import json; json.load(open('configs/jackett/Jackett/ServerConfig.json'))"
