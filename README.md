@@ -1,6 +1,6 @@
 # qBittorrent + Gluetun VPN Docker Stack
 
-A Docker Compose stack: **Gluetun** VPN gateway + **qBittorrent** (LinuxServer) + **Jackett** + **FlareSolverr** + **FileBrowser** + **Watchtower**. Automatically pushes the VPN's forwarded port into qBittorrent whenever the VPN re-connects, and reports stack events to Discord.
+A Docker Compose stack: Gluetun VPN gateway, qBittorrent (LinuxServer), Jackett, FlareSolverr, FileBrowser, and Watchtower. Pushes the VPN's forwarded port into qBittorrent on every reconnect and reports stack events to Discord.
 
 Designed to drop into the Docker VM provisioned by the companion repo [docker-pve](https://github.com/rob-paprocki/docker-pve) (which pre-installs Dockge, Portainer, and Watchtower under `/opt/stacks/`), but works on any Docker host.
 
@@ -9,7 +9,7 @@ Designed to drop into the Docker VM provisioned by the companion repo [docker-pv
 * Docker Engine 20.10+ with the Docker Compose plugin
 * `/dev/net/tun` available on the host (loaded automatically on most Linux kernels)
 * `NET_ADMIN` capability (granted via `cap_add` in the compose file)
-* **A VPN provider that supports port forwarding through Gluetun.** The port-update flow depends on it. As of this writing, Gluetun supports port forwarding for: **ProtonVPN, Private Internet Access, Perfect Privacy, PrivateVPN**. NordVPN, Mullvad and AirVPN are *not* supported for this path — the stack will connect, but qBittorrent's listen port will stay at 0 and nothing will seed.
+* A VPN provider that supports port forwarding through Gluetun; the port-update flow depends on it. Gluetun currently covers ProtonVPN, Private Internet Access, Perfect Privacy, and PrivateVPN. NordVPN, Mullvad, and AirVPN are not supported on this path: the stack will connect, but qBittorrent's listen port will stay at 0 and nothing will seed.
 
 See the current list in Gluetun's wiki: <https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/vpn-port-forwarding.md>
 
@@ -38,7 +38,7 @@ docker compose up -d
 
 ### Deploy via Dockge (recommended on the paired docker-pve VM)
 
-If the host is the Docker VM produced by [docker-pve](https://github.com/rob-paprocki/docker-pve), clone into `/opt/stacks/` as above and Dockge (at `http://<host>:5001`) will auto-discover `torrent-stack`. Edit `.env` and start the stack from the Dockge UI — no CLI needed after the clone.
+If the host is the Docker VM produced by [docker-pve](https://github.com/rob-paprocki/docker-pve), clone into `/opt/stacks/` as above and Dockge (at `http://<host>:5001`) will auto-discover `torrent-stack`. After the clone you can edit `.env` and start the stack from the Dockge UI without touching the CLI again.
 
 ### Upgrading from a pre-`name: torrent-stack` deployment
 
@@ -85,9 +85,9 @@ TL;DR after the stack is up:
 ## Operational notes
 
 * **Image tags.** `qbittorrent` and `jackett` are LinuxServer images; their tag convention is `<upstream>_v<libtorrent>-ls<build>` with a rolling `:latest`. This repo leaves them on `:latest` and lets Watchtower pull nightly. Pin the tag in `compose.yaml` if reproducibility matters more than auto-update.
-* **Watchtower fork.** `containrrr/watchtower` was archived on 2025-12-17 at `v1.7.1`. This stack now pins `ghcr.io/nicholas-fedor/watchtower:v1.23.2`, the active community fork — drop-in compatible on env and labels. Not fronted by `docker-socket-proxy`: this instance performs updates and would need `POST` allowed anyway.
+* **Watchtower fork.** `containrrr/watchtower` was archived on 2025-12-17 at `v1.7.1`. This stack pins `ghcr.io/nicholas-fedor/watchtower:v1.23.2`, the active community fork, which is drop-in compatible on env and labels. The Watchtower here is not fronted by `docker-socket-proxy`: it performs updates, so it would need `POST` allowed anyway, which the proxy would have to grant.
 * **IPv6.** Disabled via a Docker sysctl on the gluetun service (`net.ipv6.conf.all.disable_ipv6=1`), which propagates to every container on `network_mode: service:gluetun`. The host's IPv6 is untouched.
 
 ## License
 
-Released under the [MIT License](LICENSE) — Copyright © 2025 Rob Paprocki.
+Released under the [MIT License](LICENSE). Copyright © 2025 Rob Paprocki.
