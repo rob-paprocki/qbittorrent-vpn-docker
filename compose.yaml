@@ -115,12 +115,15 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.scope=torrent-stack"
 
-  # Watchtower v1.7.1 is the last release before the containrrr project was
-  # archived (Dec 2025). Pinned to that tag so an unmaintained :latest cannot
-  # drift. Consider replacing with a maintained fork (nickfedor/watchtower) or
-  # a notify-only tool (diun, renovate) in a future revision.
+  # Watchtower: containrrr was archived Dec 2025 at v1.7.1; switched to
+  # nicholas-fedor's active community fork, drop-in compatible on env and
+  # labels. Not fronted by docker-socket-proxy here because this instance
+  # performs updates (recreate requires POST /containers/create), so a
+  # read-only proxy would need to allow POST and would not meaningfully
+  # reduce authority. The paired docker-pve stack places a POST=0 proxy
+  # in front of its monitor-only watchtower where it does pay off.
   watchtower:
-    image: containrrr/watchtower:1.7.1
+    image: ghcr.io/nicholas-fedor/watchtower:v1.23.2
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     # Modern Watchtower auto-detects shoutrrr from the URL scheme, so
