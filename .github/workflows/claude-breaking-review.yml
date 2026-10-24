@@ -9,8 +9,14 @@ name: Breaking-change review
 # at the Claude step.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [labeled]
+
+# pull_request_target runs the workflow definition from the base branch
+# (main), not the PR branch. That dodges the claude-code-action's own
+# workflow-validation step, which refuses to run if the workflow file
+# differs between main and the PR — Dependabot PRs that touch workflow
+# files (e.g. actions/checkout bumps) would otherwise never get reviewed.
 
 permissions:
   contents: read
@@ -23,8 +29,12 @@ jobs:
     if: contains(github.event.pull_request.labels.*.name, 'breaking-candidate')
     runs-on: ubuntu-latest
     steps:
+      # pull_request_target checks out main by default; override to the PR
+      # head so Claude sees the diff it is reviewing. The code is not
+      # executed here, only read, so there is no privilege-escalation risk.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Claude breaking-change review
