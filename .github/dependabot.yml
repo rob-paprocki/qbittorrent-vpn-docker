@@ -1,0 +1,41 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/New_York"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "deps"
+    groups:
+      actions-non-major:
+        update-types: ["minor", "patch"]
+
+  # docker-compose covers the six `image:` lines in compose.yaml. The two
+  # LinuxServer images are pinned at `:latest` with the <upstream>_v<lt>-
+  # ls<build> rolling convention and no SemVer, so they are ignored here
+  # and tracked by Watchtower at runtime. See UPSTREAMS.md for the Round-4
+  # pin-them-properly plan.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/New_York"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "deps"
+    ignore:
+      - dependency-name: "lscr.io/linuxserver/qbittorrent"
+      - dependency-name: "lscr.io/linuxserver/jackett"
+    groups:
+      images-non-major:
+        update-types: ["minor", "patch"]

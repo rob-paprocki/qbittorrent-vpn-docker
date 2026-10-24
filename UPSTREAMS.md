@@ -2,7 +2,12 @@
 
 Every pinned version in this repo, where it comes from, and what to watch for.
 
-Renovate ([`renovate.json`](renovate.json)) opens PRs for bumps on a Monday morning cadence. Major-version bumps land on their own PR with the `breaking-candidate` label, which triggers [`.github/workflows/claude-breaking-review.yml`](.github/workflows/claude-breaking-review.yml); that workflow has Claude read the upstream changelog, decide whether the bump is a real break for this repo, and comment on the PR with a verdict. This file is the human companion.
+Two moving parts handle the automation:
+
+- [`.github/dependabot.yml`](.github/dependabot.yml) auto-bumps GitHub Actions and the Docker-Compose images in `compose.yaml`. Non-major bumps group on one Monday PR; majors land solo. The two LinuxServer rolling tags are on an `ignore:` list (see below).
+- [`.github/workflows/label-major-bumps.yml`](.github/workflows/label-major-bumps.yml) adds the `breaking-candidate` label to any Dependabot PR crossing a major-version boundary. That label fires [`.github/workflows/claude-breaking-review.yml`](.github/workflows/claude-breaking-review.yml), which has Claude read the upstream changelog, grep this repo for the specific symbols flagged, and comment with a `REAL / NOT / UNCLEAR` verdict.
+
+Dependabot cannot label *minor* bumps as breaking the way Renovate's per-package rules could, so for `qmcgaw/gluetun` (provider wire-protocol env renames have shipped as minors) the breaking-signal watch is a human reminder named in the Gluetun entry below.
 
 ## Container images (pinned)
 
@@ -10,7 +15,7 @@ Renovate ([`renovate.json`](renovate.json)) opens PRs for bumps on a Monday morn
 
 - **Pinned at:** `v3.41.3` (in `compose.yaml`)
 - **Source:** [`qdm12/gluetun`](https://github.com/qdm12/gluetun) and the [port-forwarding wiki](https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/vpn-port-forwarding.md)
-- **Breaking signals:** Gluetun carries VPN provider wire protocols and the port-forwarding integration this stack relies on. Both majors and minors are tagged `breaking-candidate` in `renovate.json` because provider-specific env variable renames have shipped as minors before. Changelog items under "BREAKING" or named provider removal are the signals to check.
+- **Breaking signals:** Gluetun carries VPN provider wire protocols and the port-forwarding integration this stack relies on. **Minor bumps can be breaking** here; provider-specific env variable renames have shipped as minors. Dependabot cannot label minors conditionally per-package, so when a Dependabot PR for `qmcgaw/gluetun` opens, add the `breaking-candidate` label by hand to trigger the Claude review workflow. Signals to check in the changelog: items under "BREAKING", named provider removal, env variable renames.
 - **Bump by hand:** change `image: qmcgaw/gluetun:...`, re-render the `.env.example` surface against the current Gluetun env table, redeploy.
 
 ### `ghcr.io/flaresolverr/flaresolverr`
@@ -22,7 +27,7 @@ Renovate ([`renovate.json`](renovate.json)) opens PRs for bumps on a Monday morn
 
 ### `ghcr.io/nicholas-fedor/watchtower`
 
-- **Pinned at:** `v1.23.2` — the active community fork of the archived `containrrr/watchtower`.
+- **Pinned at:** `v1.23.2`, the active community fork of the archived `containrrr/watchtower`.
 - **Source:** [`nicholas-fedor/watchtower`](https://github.com/nicholas-fedor/watchtower)
 - **Breaking signals:** env variable renames, label-prefix changes (`com.centurylinklabs.watchtower.*` is the stable prefix). This stack uses `WATCHTOWER_NOTIFICATION_URL`, `WATCHTOWER_SCOPE`, `WATCHTOWER_SCHEDULE`, and the shoutrrr URL scheme set.
 - **Bump by hand:** change the image tag. The paired `docker-pve` stack pins the same image and the same tag; keep them in sync when bumping either.
@@ -41,7 +46,7 @@ Renovate ([`renovate.json`](renovate.json)) opens PRs for bumps on a Monday morn
 - **Pinned at:** `:latest` (not pinned)
 - **Source:** LinuxServer uses the tag convention `<upstream_version>_v<libtorrent_version>-ls<build>` with a rolling `:latest`. No SemVer promise and no breaking-change log for the LinuxServer wrapper; breaking changes ship on the rolling tag without a major bump.
 - **Why left on `:latest`:** pinning requires watching two upstream version streams (qBit itself, libtorrent) plus the LinuxServer build number, and tracking them properly is Round-4 work. Watchtower pulls nightly and reports the pull through the notification channel, so a bad build announces itself.
-- **Renovate behaviour:** both are explicitly disabled in `renovate.json` so Renovate does not try to bump `:latest` to itself every week.
+- **Dependabot behaviour:** both are on the `ignore:` list in `.github/dependabot.yml` so no PR is ever opened for them.
 - **Bump by hand (pin, if desired):** replace `:latest` with the exact `<version>_v<libtorrent>-ls<build>` string shown by `docker inspect` on a running container.
 
 ## Non-container upstreams
@@ -51,10 +56,10 @@ Renovate ([`renovate.json`](renovate.json)) opens PRs for bumps on a Monday morn
 - **Pinned at:** inside `.github/workflows/*.yml` (`actions/checkout@v4`, `ludeeus/action-shellcheck@2.0.0`, `anthropics/claude-code-action@v1`)
 - **Source:** each action's own GitHub repo
 - **Breaking signals:** `v1` → `v2` major on `claude-code-action` is the one most likely to actually require changes (prompt / input renames).
-- **Bump by hand:** change the `@` tag. Renovate also opens PRs for these.
+- **Auto-tracked:** yes, by Dependabot (`github-actions` ecosystem). Non-major bumps group on a Monday PR; majors land solo and get labelled `breaking-candidate` by `label-major-bumps.yml`.
 
 ## How to add a new pinned dep
 
-1. Add the `image: ...:<tag>` line in `compose.yaml` (standard Docker Compose Renovate manager picks it up automatically).
-2. If the dep deserves `breaking-candidate` on minors too (like `qmcgaw/gluetun`), add a `packageRules` entry in `renovate.json` naming it.
+1. Add the `image: ...:<tag>` line in `compose.yaml`. Dependabot's `docker-compose` ecosystem picks it up on the next scheduled run.
+2. If the dep deserves `breaking-candidate` on minors too (like `qmcgaw/gluetun`), add a human-reminder sentence to its entry here. Dependabot cannot condition labels per-package, so this is a per-dep manual flag.
 3. Add a section here with a source link, breaking signals, and a bump-by-hand paragraph.

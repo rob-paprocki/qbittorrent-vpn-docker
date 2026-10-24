@@ -1,0 +1,39 @@
+name: Label Dependabot major bumps
+
+# Dependabot cannot assign different labels to different update types in
+# its own config, so this workflow adds `breaking-candidate` to any
+# Dependabot PR whose title crosses a major-version boundary. The
+# existing claude-breaking-review.yml then fires on that label.
+#
+# Dependabot PR titles follow one of these shapes:
+#   Bump qmcgaw/gluetun from v3.41.3 to v4.0.0
+#   chore(deps): bump qmcgaw/gluetun from v3.41.3 to v4.0.0
+#   build(deps): bump qmcgaw/gluetun from v3.41.3 to v4.0.0
+# `v`-prefixed versions (e.g. v1.2.3) are handled.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  label-majors:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare major versions in PR title
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: ${{ github.event.pull_request.title }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          from=$(printf '%s' "$TITLE" | grep -oE 'from v?[0-9]+(\.[0-9]+)*' | head -1 | grep -oE '[0-9]+(\.[0-9]+)*' | head -1 | cut -d. -f1 || true)
+          to=$(printf '%s' "$TITLE" | grep -oE 'to v?[0-9]+(\.[0-9]+)*' | head -1 | grep -oE '[0-9]+(\.[0-9]+)*' | head -1 | cut -d. -f1 || true)
+          echo "from major: ${from:-?}; to major: ${to:-?}"
+          if [ -n "${from:-}" ] && [ -n "${to:-}" ] && [ "$from" != "$to" ]; then
+            gh pr edit "$PR" -R "$REPO" --add-label "breaking-candidate"
+          fi
