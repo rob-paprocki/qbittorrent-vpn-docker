@@ -32,7 +32,7 @@ jobs:
       # pull_request_target checks out main by default; override to the PR
       # head so Claude sees the diff it is reviewing. The code is not
       # executed here, only read, so there is no privilege-escalation risk.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
