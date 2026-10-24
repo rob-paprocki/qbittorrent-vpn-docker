@@ -1,0 +1,45 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":prHourlyLimit4"
+  ],
+  "schedule": ["before 6am on monday"],
+  "timezone": "America/New_York",
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 10,
+  "rangeStrategy": "pin",
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["major"],
+      "addLabels": ["breaking-candidate"],
+      "commitMessagePrefix": "deps(major):",
+      "prPriority": 10
+    },
+    {
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "non-major updates",
+      "groupSlug": "all-minor-patch",
+      "commitMessagePrefix": "deps:"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "addLabels": ["github-actions"]
+    },
+    {
+      "matchPackageNames": [
+        "lscr.io/linuxserver/qbittorrent",
+        "lscr.io/linuxserver/jackett"
+      ],
+      "description": "LinuxServer tag convention is <upstream>_v<libtorrent>-ls<build> on a rolling :latest with no SemVer. Pinning here is Round-3 deferred; see UPSTREAMS.md.",
+      "enabled": false
+    },
+    {
+      "matchDepNames": ["qmcgaw/gluetun"],
+      "description": "VPN provider wire protocols live here. Any major is a breaking candidate even if the env surface looks the same.",
+      "matchUpdateTypes": ["major", "minor"],
+      "addLabels": ["breaking-candidate"]
+    }
+  ]
+}
