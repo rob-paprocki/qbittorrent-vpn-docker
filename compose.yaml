@@ -144,7 +144,7 @@ services:
   # the project root or the configs tree here, both contain secrets (.env,
   # VPN keys, qBittorrent session cookies, Jackett APIKey).
   filebrowser:
-    image: ghcr.io/gtsteffaniak/filebrowser:v2.0.1-stable
+    image: ghcr.io/gtsteffaniak/filebrowser:2.0.2-stable
     environment:
       TZ: ${TZ}
     ports:
