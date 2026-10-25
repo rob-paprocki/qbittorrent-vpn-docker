@@ -16,11 +16,11 @@ updates:
       actions-non-major:
         update-types: ["minor", "patch"]
 
-  # docker-compose covers the six `image:` lines in compose.yaml. The two
-  # LinuxServer images are pinned at `:latest` with the <upstream>_v<lt>-
-  # ls<build> rolling convention and no SemVer, so they are ignored here
-  # and tracked by Watchtower at runtime. See UPSTREAMS.md for the Round-4
-  # pin-them-properly plan.
+  # docker-compose ecosystem kept for future-proofing: all current `image:`
+  # lines in compose.yaml are on rolling tags (`:latest` / `:stable`), so
+  # Dependabot has no version to bump and will open no PRs for them. If a
+  # future image is added with an explicit `:vX.Y.Z` tag, Dependabot will
+  # pick it up automatically.
   - package-ecosystem: "docker-compose"
     directory: "/"
     schedule:
@@ -33,9 +33,6 @@ updates:
       - "docker"
     commit-message:
       prefix: "deps"
-    ignore:
-      - dependency-name: "lscr.io/linuxserver/qbittorrent"
-      - dependency-name: "lscr.io/linuxserver/jackett"
     groups:
       images-non-major:
         update-types: ["minor", "patch"]

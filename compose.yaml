@@ -7,7 +7,7 @@ services:
   # VPN gateway. All services that must stay off the host IP route through
   # this container's network namespace via network_mode: service:gluetun.
   gluetun:
-    image: qmcgaw/gluetun:v3.41.3
+    image: qmcgaw/gluetun:latest
     cap_add:
       - NET_ADMIN
     devices:
@@ -60,7 +60,7 @@ services:
 
   # Cloudflare challenge solver for Jackett.
   flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2
+    image: ghcr.io/flaresolverr/flaresolverr:latest
     environment:
       TZ: ${TZ}
       LOG_LEVEL: info
@@ -123,7 +123,7 @@ services:
   # reduce authority. The paired docker-pve stack places a POST=0 proxy
   # in front of its monitor-only watchtower where it does pay off.
   watchtower:
-    image: ghcr.io/nicholas-fedor/watchtower:v1.23.2
+    image: ghcr.io/nicholas-fedor/watchtower:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     # Modern Watchtower auto-detects shoutrrr from the URL scheme, so
@@ -144,7 +144,7 @@ services:
   # the project root or the configs tree here, both contain secrets (.env,
   # VPN keys, qBittorrent session cookies, Jackett APIKey).
   filebrowser:
-    image: ghcr.io/gtsteffaniak/filebrowser:2.0.2-stable
+    image: ghcr.io/gtsteffaniak/filebrowser:stable
     environment:
       TZ: ${TZ}
     ports:
