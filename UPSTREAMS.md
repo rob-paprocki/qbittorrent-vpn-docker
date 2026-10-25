@@ -35,7 +35,7 @@ Dependabot cannot label *minor* bumps as breaking the way Renovate's per-package
 ### `ghcr.io/gtsteffaniak/filebrowser`
 
 - **Pinned at:** `v2.0.1-stable`
-- **Source:** [`gtstef/filebrowser`](https://github.com/gtstef/filebrowser) (the actively maintained fork)
+- **Source:** [`gtsteffaniak/filebrowser`](https://github.com/gtsteffaniak/filebrowser) (the actively maintained fork)
 - **Breaking signals:** admin credential flow (the current image prints a temporary admin password on first start; a change to that flow would need the README's post-install section updated). The mount path has to stay inside the downloads tree for security.
 - **Bump by hand:** change the image tag. Re-read the FileBrowser post-install section in the README to confirm the admin credential path still matches.
 
