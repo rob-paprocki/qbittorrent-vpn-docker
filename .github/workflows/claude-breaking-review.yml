@@ -46,6 +46,12 @@ jobs:
           # That removes the Claude GitHub App as a required install step.
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The action's default is to refuse to act on PRs opened by bots
+          # (allowed_bots default is empty). Dependabot opens the PRs this
+          # workflow is designed around, so allow it explicitly. This is
+          # safe here because the trigger is a label we add after
+          # inspecting the PR title; a hostile bot cannot label its own PRs.
+          allowed_bots: "dependabot[bot]"
           prompt: |
             A Renovate PR tagged `breaking-candidate` just landed on
             qbittorrent-vpn-docker. Your job is to tell the maintainer
