@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Settings — env-editor{% endblock %}
+{% block body %}
+
+<div class="banner {% if not env_exists %}banner-first{% endif %}">
+  {% if env_exists %}
+    Editing <code>{{ env_path }}</code>.
+  {% else %}
+    No <code>.env</code> yet. Fill in the fields and hit <strong>Preview</strong> to create it.
+  {% endif %}
+</div>
+
+<form method="post" action="{{ url_for('preview') }}" id="env-form">
+  {% for section, fields in sections.items() %}
+  <section class="card" data-section="{{ section }}">
+    <h2>{{ section }}</h2>
+    {% for f in fields %}
+    <div class="field"
+         {% if f.shown_when %}data-shown-when='{{ f.shown_when|tojson }}'{% endif %}>
+      <label for="f-{{ f.name }}">
+        {{ f.label }}
+        {% if f.required %}<span class="req">*</span>{% endif %}
+        <span class="var">{{ f.name }}</span>
+      </label>
+
+      {% if f.type == "select" %}
+        <select name="{{ f.name }}" id="f-{{ f.name }}">
+          {% if f.choices %}
+            {% for c in f.choices %}
+              <option value="{{ c }}" {% if c == f.value %}selected{% endif %}>{{ c }}</option>
+            {% endfor %}
+          {% elif f.choices_grouped %}
+            {% for group_label, group_choices in f.choices_grouped %}
+              <optgroup label="{{ group_label }}">
+                {% for c in group_choices %}
+                  <option value="{{ c }}" {% if c == f.value %}selected{% endif %}>{{ c }}</option>
+                {% endfor %}
+              </optgroup>
+            {% endfor %}
+          {% endif %}
+        </select>
+
+      {% elif f.type == "toggle" %}
+        <label class="toggle">
+          <input type="checkbox" name="{{ f.name }}" id="f-{{ f.name }}"
+                 {% if f.value == "on" %}checked{% endif %}>
+          <span>on</span>
+        </label>
+
+      {% elif f.type == "password" %}
+        <input type="password" name="{{ f.name }}" id="f-{{ f.name }}"
+               value="{{ f.value }}" autocomplete="new-password">
+
+      {% elif f.type == "port" %}
+        <input type="number" name="{{ f.name }}" id="f-{{ f.name }}"
+               value="{{ f.value }}" min="1" max="65535">
+
+      {% elif f.type == "int" %}
+        <input type="number" name="{{ f.name }}" id="f-{{ f.name }}"
+               value="{{ f.value }}" min="0">
+
+      {% elif f.type == "url" %}
+        <input type="url" name="{{ f.name }}" id="f-{{ f.name }}"
+               value="{{ f.value }}" placeholder="https://…">
+
+      {% else %}
+        <input type="text" name="{{ f.name }}" id="f-{{ f.name }}" value="{{ f.value }}">
+      {% endif %}
+
+      {% if f.help %}<p class="help">{{ f.help }}</p>{% endif %}
+    </div>
+    {% endfor %}
+  </section>
+  {% endfor %}
+
+  <div class="actions">
+    <button type="submit" class="primary">Preview changes →</button>
+  </div>
+</form>
+
+<script>
+// Conditional field visibility: data-shown-when='{"VPN_TYPE": "openvpn"}' means
+// show the field only when the current form value for VPN_TYPE equals "openvpn".
+(function() {
+  const form = document.getElementById("env-form");
+  const conds = form.querySelectorAll("[data-shown-when]");
+  function refresh() {
+    for (const el of conds) {
+      const rule = JSON.parse(el.dataset.shownWhen);
+      const [key] = Object.keys(rule);
+      const want = rule[key];
+      const field = form.elements[key];
+      const have = field ? (field.type === "checkbox" ? (field.checked ? "on" : "off") : field.value) : "";
+      el.style.display = (have === want) ? "" : "none";
+    }
+  }
+  form.addEventListener("change", refresh);
+  refresh();
+})();
+</script>
+
+{% endblock %}

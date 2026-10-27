@@ -1,0 +1,183 @@
+"""One-shot seeders for the config files qBittorrent/Jackett/FileBrowser
+read on first start. Each seeder is idempotent: if the target key is
+already present it is overwritten with the current value; untouched fields
+stay as the user left them.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import re
+import secrets
+import urllib.request
+from pathlib import Path
+
+import bcrypt
+
+# Pulled from the qbittorrent search-plugins repo. This is the exact file
+# the README's manual TL;DR points at.
+QBIT_JACKETT_PLUGIN_URL = (
+    "https://raw.githubusercontent.com/qbittorrent/search-plugins/"
+    "master/nova3/engines/jackett.py"
+)
+
+
+# ---------------------------------------------------------------------------
+# qBittorrent
+# ---------------------------------------------------------------------------
+
+def qbit_password_hash(password: str) -> str:
+    """Return the qBittorrent-format PBKDF2 password hash.
+
+    qBit's on-disk format: `@ByteArray(<base64 salt>:<base64 hash>)` where
+    hash = PBKDF2-HMAC-SHA512(password, salt, 100000 iterations, 64 bytes).
+    """
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha512", password.encode("utf-8"), salt, 100000)
+    salt_b64 = base64.b64encode(salt).decode("ascii")
+    hash_b64 = base64.b64encode(digest).decode("ascii")
+    return f"@ByteArray({salt_b64}:{hash_b64})"
+
+
+def seed_qbittorrent(config_root: Path, username: str, password: str) -> None:
+    """Write the qBit WebUI user, PBKDF2 password, and search-enabled flag
+    into qBittorrent.conf. Also installs the Jackett search plugin into
+    nova3/engines/.
+    """
+    conf = config_root / "qbittorrent" / "qBittorrent" / "qBittorrent.conf"
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    text = conf.read_text(encoding="utf-8") if conf.exists() else ""
+
+    text = _upsert_ini(text, "Preferences", "WebUI\\Username", username)
+    text = _upsert_ini(text, "Preferences", "WebUI\\Password_PBKDF2",
+                      f'"{qbit_password_hash(password)}"')
+    text = _upsert_ini(text, "Preferences", "Search\\SearchEnabled", "true")
+    conf.write_text(text, encoding="utf-8")
+
+    _install_qbit_search_plugin(config_root)
+
+
+def _install_qbit_search_plugin(config_root: Path) -> None:
+    engines = config_root / "qbittorrent" / "qBittorrent" / "nova3" / "engines"
+    engines.mkdir(parents=True, exist_ok=True)
+    plugin = engines / "jackett.py"
+    if not plugin.exists():
+        with urllib.request.urlopen(QBIT_JACKETT_PLUGIN_URL, timeout=15) as resp:
+            plugin.write_bytes(resp.read())
+
+
+def seed_qbit_jackett_wiring(config_root: Path, api_key: str,
+                             jackett_host: str = "127.0.0.1",
+                             jackett_port: int = 9117) -> None:
+    """Write the plugin's JSON config pointing at Jackett."""
+    engines = config_root / "qbittorrent" / "qBittorrent" / "nova3" / "engines"
+    engines.mkdir(parents=True, exist_ok=True)
+    (engines / "jackett.json").write_text(
+        json.dumps({
+            "api_key": api_key,
+            "url": f"http://{jackett_host}:{jackett_port}",
+            "tracker_first": False,
+            "thingy": "",
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Jackett
+# ---------------------------------------------------------------------------
+
+def ensure_jackett_api_key(config_root: Path) -> str:
+    """Return Jackett's APIKey, generating one if ServerConfig.json has none."""
+    sc = config_root / "jackett" / "Jackett" / "ServerConfig.json"
+    sc.parent.mkdir(parents=True, exist_ok=True)
+    data: dict = {}
+    if sc.exists():
+        try:
+            data = json.loads(sc.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            data = {}
+    if not data.get("APIKey"):
+        data["APIKey"] = secrets.token_hex(16)
+    data.setdefault("Port", 9117)
+    data.setdefault("LocalBindAddress", "*")
+    data.setdefault("FlareSolverrUrl", "http://127.0.0.1:8191")
+    data.setdefault("FlareSolverrMaxTimeout", 55000)
+    sc.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return data["APIKey"]
+
+
+# ---------------------------------------------------------------------------
+# FileBrowser (gtsteffaniak fork)
+# ---------------------------------------------------------------------------
+
+def seed_filebrowser(config_root: Path, username: str, password: str) -> None:
+    """Write a settings.yaml with a bcrypt admin password.
+
+    gtsteffaniak/filebrowser's config schema uses `auth.adminPassword` plus
+    `auth.adminUsername` for first-boot admin seeding. Password is bcrypt.
+    """
+    fb_root = config_root / "filebrowser"
+    fb_root.mkdir(parents=True, exist_ok=True)
+    settings = fb_root / "settings.yaml"
+    pw_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
+    settings.write_text(
+        "# Generated by env-editor. Edits here persist; re-seed only replaces\n"
+        "# auth.adminUsername and auth.adminPassword.\n"
+        "server:\n"
+        "  port: 80\n"
+        "  baseURL: \"\"\n"
+        "auth:\n"
+        f"  adminUsername: {username}\n"
+        f"  adminPassword: \"{pw_hash}\"\n",
+        encoding="utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Minimal INI helper for qBittorrent.conf
+# ---------------------------------------------------------------------------
+
+def _upsert_ini(text: str, section: str, key: str, value: str) -> str:
+    """Insert-or-replace a section/key in a Qt-style INI blob.
+
+    Qt's INI uses backslash-escaped sub-keys (e.g. WebUI\\Password_PBKDF2)
+    which configparser mangles, so we do line-level string ops instead.
+    """
+    section_re = re.compile(r'^\[([^\]]+)\]\s*$')
+    key_literal = f"{key}={value}"
+    key_re = re.compile(r'^\s*' + re.escape(key) + r'\s*=')
+
+    lines = text.splitlines()
+    current = None
+    section_start = None
+    section_end = None
+    key_line_idx = None
+
+    for i, line in enumerate(lines):
+        m = section_re.match(line)
+        if m:
+            if current == section and section_end is None:
+                section_end = i
+            current = m.group(1)
+            if current == section and section_start is None:
+                section_start = i
+            continue
+        if current == section and key_re.match(line):
+            key_line_idx = i
+
+    if key_line_idx is not None:
+        lines[key_line_idx] = key_literal
+        return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+    if section_start is None:
+        suffix = [] if text.endswith("\n") or not text else [""]
+        return (text + "\n".join(suffix + [f"[{section}]", key_literal, ""])).rstrip("\n") + "\n"
+
+    insert_at = section_end if section_end is not None else len(lines)
+    while insert_at > section_start + 1 and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+    lines.insert(insert_at, key_literal)
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Confirm — env-editor{% endblock %}
+{% block body %}
+
+<h1>Review changes</h1>
+
+{% if not changed %}
+  <p class="dim">Nothing changed. <a href="{{ url_for('form_page') }}">Back</a>.</p>
+{% else %}
+  <section class="card">
+    <h2>Values that will change</h2>
+    <table class="diff">
+      <thead><tr><th>Key</th><th>Before</th><th>After</th></tr></thead>
+      <tbody>
+      {% for key, pair in changed.items() %}
+        <tr>
+          <td><code>{{ key }}</code></td>
+          <td class="before">{{ pair[0] or '—' }}</td>
+          <td class="after">{{ pair[1] or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>What this will do</h2>
+    <ul class="plan">
+      <li>Write the new values to <code>.env</code>.</li>
+      {% if seeders %}
+        {% for s in seeders %}
+          {% if s == "qbit" %}
+            <li>Re-seed <code>qBittorrent.conf</code> (new PBKDF2 hash + search plugin wiring).</li>
+          {% elif s == "filebrowser" %}
+            <li>Re-seed FileBrowser admin credentials (bcrypt).</li>
+          {% else %}
+            <li>Run seeder: <code>{{ s }}</code>.</li>
+          {% endif %}
+        {% endfor %}
+      {% endif %}
+      {% if services %}
+        <li>
+          {% if full_restart %}
+            Recycle the <strong>entire stack</strong>:
+          {% else %}
+            Recycle:
+          {% endif %}
+          {% for s in services %}<code>{{ s }}</code>{{ ", " if not loop.last }}{% endfor %}
+          <br><span class="dim small">(<code>docker compose up -d {{ services|join(' ') }}</code>)</span>
+        </li>
+      {% else %}
+        <li class="dim">No services need recycling.</li>
+      {% endif %}
+    </ul>
+  </section>
+
+  <form method="post" action="{{ url_for('apply') }}">
+    <div class="actions">
+      <a href="{{ url_for('form_page') }}" class="button">← Back</a>
+      <button type="submit" class="primary">Apply changes</button>
+    </div>
+  </form>
+{% endif %}
+
+{% endblock %}

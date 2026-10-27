@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Applied — env-editor{% endblock %}
+{% block body %}
+
+<h1>Applied</h1>
+
+<section class="card">
+  <pre class="log">{% for line in log %}{{ line }}
+{% endfor %}</pre>
+</section>
+
+{% if services %}
+<section class="card">
+  <h2>Next</h2>
+  <p>Give the recycled services ~20 seconds, then check the stack:</p>
+  <ul>
+    <li>qBittorrent WebUI: <code>http://&lt;host&gt;:${QBIT_WEBUI_PORT}</code></li>
+    <li>Jackett: <code>http://&lt;host&gt;:${JACKETT_PORT}</code></li>
+    <li>FileBrowser: <code>http://&lt;host&gt;:${FILEBROWSER_PORT}</code></li>
+  </ul>
+  <p>If Jackett is up, <a href="{{ url_for('indexers_page') }}">add some indexers →</a></p>
+</section>
+{% endif %}
+
+<div class="actions">
+  <a href="{{ url_for('form_page') }}" class="button">← Back to settings</a>
+</div>
+
+{% endblock %}
