@@ -48,6 +48,16 @@ GitHub Actions references in `.github/workflows/*.yml` **are** pinned, and those
 
 ## Non-container upstreams
 
+### `scripts/env-editor` runtime
+
+A host-side Python app, not a container, so no image to pin. Dependencies installed into a venv at `scripts/env-editor/.venv/` on first `./scripts/setup.sh` run.
+
+- **Python**: 3.9+ (any version on PATH; `scripts/setup.sh` auto-picks the newest `python3*` it finds).
+- **PyPI deps**: `flask`, `bcrypt`, `requests` — see `scripts/env-editor/requirements.txt`.
+- **qBittorrent search plugin**: `scripts/env-editor/seed_configs.py` downloads `jackett.py` from <https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/jackett.py> on first seed. Delete `./configs/qbittorrent/qBittorrent/nova3/engines/jackett.py` to refetch.
+- **Breaking signals:** Jackett's `/api/v2.0/indexers/<id>/config` schema — the Indexers tab is schema-driven, so a Jackett API change there would show up as a form that no longer validates against Jackett when submitted.
+- **Pin / rollback:** edit `requirements.txt` and `rm -rf scripts/env-editor/.venv` to rebuild.
+
 ### GitHub Actions
 
 - **Pinned at:** inside `.github/workflows/*.yml` (`actions/checkout@v4`, `ludeeus/action-shellcheck@2.0.0`, `anthropics/claude-code-action@v1`)

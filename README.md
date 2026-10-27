@@ -25,20 +25,25 @@ cd qbittorrent-vpn-docker
 
 # Prep host-side state dirs so the containers can write them as PUID/PGID.
 mkdir -p configs downloads/incomplete
-# If PUID/PGID in .env are 1000, chown accordingly:
-sudo chown -R 1000:1000 configs downloads
+sudo chown -R 1000:1000 configs downloads  # match PUID/PGID
 
-# Fill in your VPN credentials, Discord webhook, etc.
-cp .env.example .env
-nano .env
-
-# Launch.
-docker compose up -d
+# Launch the setup editor. First run creates a Python venv (~10 MB),
+# auto-generates an admin password (printed to stdout, saved to
+# configs/env-editor/credentials.json), then serves the form on :9191.
+./scripts/setup.sh
 ```
+
+Open `http://<host>:9191` in a browser, log in with the printed credentials, fill in VPN details and ports, hit **Preview changes** then **Apply**. The editor writes `.env`, seeds `qBittorrent.conf` (PBKDF2 password + search-plugin wiring), seeds the FileBrowser admin credentials (bcrypt, reusing the qBittorrent password), generates a Jackett API key, and brings the stack up. No temp-password log-grep dance, no plugin-install UI clicking, no API-key copy/paste.
+
+The editor stays running — same URL, same login — for any future `.env` edit. It computes a diff of what's changing on save and only recycles the services that depend on the changed variables.
+
+### Add indexers
+
+With the stack up, the editor's **Indexers** tab lists everything in Jackett's catalog. Click **configure** on an indexer, fill in whatever credentials Jackett asks for (public trackers need none; private trackers prompt for passkey/cookie/etc.), save. Jackett's own UI at `http://<host>:${JACKETT_PORT}` still works if you prefer it.
 
 ### Deploy via Dockge (recommended on the paired docker-pve VM)
 
-If the host is the Docker VM produced by [docker-pve](https://github.com/rob-paprocki/docker-pve), clone into `/opt/stacks/` as above and Dockge (at `http://<host>:5001`) will auto-discover `torrent-stack`. After the clone you can edit `.env` and start the stack from the Dockge UI without touching the CLI again.
+If the host is the Docker VM produced by [docker-pve](https://github.com/rob-paprocki/docker-pve), clone into `/opt/stacks/` as above and Dockge (at `http://<host>:5001`) will auto-discover `torrent-stack`. Dockge is handy for log tailing and ad-hoc text edits to `compose.yaml`; the env-editor is still the recommended path for `.env` changes because it handles the config-seeding and smart-restart.
 
 ### Upgrading from a pre-`name: torrent-stack` deployment
 
@@ -49,38 +54,17 @@ docker compose -p qbittorrent-vpn-docker down   # or -p docker-vpn-qbittorrent, 
 docker compose up -d
 ```
 
-## Post-install
+## Doing it manually (without the editor)
 
-### FileBrowser
+If you'd rather skip the editor and provision by hand — the stack still works end-to-end that way; the editor is a convenience, not a dependency.
 
-The default admin credential depends on the FileBrowser image version. If `admin / admin` fails, retrieve the initial password from the container log:
+* **`.env`** — `cp .env.example .env`, edit in `$EDITOR`.
+* **FileBrowser** — default admin credential depends on the image version. If `admin / admin` fails, retrieve the initial password from the container log (`docker compose logs filebrowser | grep -i -E 'password|admin'`). Change it under **Settings → User Management**.
+* **qBittorrent** — the LinuxServer image prints a temporary admin password on first start (`docker compose logs qbittorrent | grep -i -A1 'temporary.*password'`). Log in with it, set a permanent one in **Tools → Options → Web UI**, put it in `.env` as `QBITTORRENT_PASSWORD`. The port-update script uses that credential.
+* **Jackett search plugin** — enable **Tools → Options → Search → "Enable search engine"** in qBittorrent, install the plugin via **Search → Search Plugins → Install new** with `https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/jackett.py`, then paste your Jackett API key into `./configs/qbittorrent/qBittorrent/nova3/engines/jackett.json`.
+* **Jackett indexers** — add them in Jackett's own UI at `http://<host>:${JACKETT_PORT}`.
 
-```bash
-docker compose logs filebrowser | grep -i -E 'password|admin'
-```
-
-Change it immediately under **Settings → User Management**. The default compose binds the UI to `0.0.0.0:${FILEBROWSER_PORT}` on the host; firewall it off, use a reverse proxy, or set `FILEBROWSER_PORT` to a loopback-only bind if the host is reachable from untrusted networks.
-
-### qBittorrent
-
-The LinuxServer qBittorrent image prints a temporary admin password to the container log on first start:
-
-```bash
-docker compose logs qbittorrent | grep -i -A1 'temporary.*password'
-```
-
-Log in with that password, then set a permanent one under **Tools → Options → Web UI** and put it in `.env` as `QBITTORRENT_USER` / `QBITTORRENT_PASSWORD`. `update-qbittorrent.sh` uses those credentials to push the forwarded port after each VPN reconnect.
-
-### Jackett search plugin
-
-Follow the upstream guide: <https://github.com/qbittorrent/search-plugins/wiki/How-to-configure-Jackett-plugin>
-
-TL;DR after the stack is up:
-
-1. In qBittorrent, enable the Search tab: **Tools → Options → Search → "Enable search engine"** (this is what first creates `configs/qbittorrent/qBittorrent/nova3/`).
-2. In qBittorrent, install the Jackett plugin: **Search → Search Plugins → Install new**, paste
-   `https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/jackett.py`
-3. Open `./configs/qbittorrent/qBittorrent/nova3/engines/jackett.json`, paste your Jackett API key, and save.
+The `FILEBROWSER_PORT` compose binding is `0.0.0.0:${FILEBROWSER_PORT}` by default; firewall it off, use a reverse proxy, or set it to a loopback-only bind if the host is reachable from untrusted networks.
 
 ## Operational notes
 
