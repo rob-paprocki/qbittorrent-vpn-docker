@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Configure {{ indexer_id }} — env-editor{% endblock %}
+{% block body %}
+
+<h1>Configure <code>{{ indexer_id }}</code></h1>
+
+<form method="post">
+  <section class="card">
+    {% for item in schema %}
+      {% set itype = item.get('type', '') %}
+      {% set iid = item.get('id', '') %}
+      {% if itype == 'displayinfo' %}
+        <p class="help">{{ item.get('value', '') }}</p>
+      {% elif itype == 'hiddendata' %}
+        <input type="hidden" name="f_{{ iid }}" value="{{ item.get('value', '') }}">
+      {% elif itype == 'inputbool' %}
+        <div class="field">
+          <label class="toggle">
+            <input type="checkbox" name="f_{{ iid }}" {% if item.get('value') %}checked{% endif %}>
+            <span>{{ item.get('name', iid) }}</span>
+          </label>
+        </div>
+      {% elif itype == 'inputselect' %}
+        <div class="field">
+          <label>{{ item.get('name', iid) }}</label>
+          <select name="f_{{ iid }}">
+            {% for opt_val, opt_label in (item.get('options') or {}).items() %}
+              <option value="{{ opt_val }}" {% if opt_val == item.get('value') %}selected{% endif %}>{{ opt_label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      {% else %}
+        <div class="field">
+          <label>{{ item.get('name', iid) }}</label>
+          {% if iid in ['password', 'passkey', 'apikey', 'cookie'] or 'password' in iid|lower %}
+            <input type="password" name="f_{{ iid }}" value="{{ item.get('value', '') }}">
+          {% else %}
+            <input type="text" name="f_{{ iid }}" value="{{ item.get('value', '') }}">
+          {% endif %}
+        </div>
+      {% endif %}
+    {% endfor %}
+  </section>
+  <div class="actions">
+    <a href="{{ url_for('indexers_page') }}" class="button">← Cancel</a>
+    <button type="submit" class="primary">Save indexer</button>
+  </div>
+</form>
+
+{% endblock %}

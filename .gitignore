@@ -25,6 +25,14 @@
 /configs/qbittorrent/qBittorrent/*
 !/configs/qbittorrent/qBittorrent/qBittorrent.conf
 
+# env-editor runtime state: auto-generated admin creds (bcrypt hash) and
+# the Python venv built by scripts/setup.sh. The whole configs/env-editor/
+# tree is runtime-only — nothing in it is checked in.
+/configs/env-editor/
+/scripts/env-editor/.venv/
+/scripts/env-editor/__pycache__/
+/scripts/env-editor/*.pyc
+
 # Editor / OS cruft.
 *.swp
 *.swo

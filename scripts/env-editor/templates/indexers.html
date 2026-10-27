@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Indexers — env-editor{% endblock %}
+{% block body %}
+
+<h1>Jackett indexers</h1>
+
+{% if not up %}
+  <div class="banner banner-error">
+    Jackett isn't reachable. Save your <a href="{{ url_for('form_page') }}">settings</a> and bring the stack up first.
+  </div>
+{% else %}
+
+  <section class="card">
+    <h2>Configured ({{ configured|length }})</h2>
+    {% if configured %}
+      <table class="indexers">
+        <thead><tr><th>Name</th><th>Type</th><th>Language</th><th></th></tr></thead>
+        <tbody>
+        {% for i in configured %}
+          <tr>
+            <td>{{ i.name }}</td>
+            <td class="dim">{{ i.type }}</td>
+            <td class="dim">{{ i.language }}</td>
+            <td>
+              <form method="post" action="{{ url_for('indexer_delete', indexer_id=i.id) }}" style="display:inline">
+                <button type="submit" class="link-button danger"
+                        onclick="return confirm('Remove {{ i.name }}?')">remove</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="dim">No indexers configured yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Available ({{ available|length }})</h2>
+    <input id="filter" type="search" placeholder="Filter by name…">
+    <table class="indexers" id="available-table">
+      <thead><tr><th>Name</th><th>Type</th><th>Description</th><th></th></tr></thead>
+      <tbody>
+      {% for i in available %}
+        <tr>
+          <td>{{ i.name }}</td>
+          <td class="dim">{{ i.type }}</td>
+          <td class="dim small">{{ i.description }}</td>
+          <td><a class="button" href="{{ url_for('indexer_configure', indexer_id=i.id) }}">configure</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <script>
+  (function() {
+    const q = document.getElementById("filter");
+    const rows = document.querySelectorAll("#available-table tbody tr");
+    q.addEventListener("input", () => {
+      const needle = q.value.toLowerCase();
+      for (const r of rows) {
+        r.style.display = r.textContent.toLowerCase().includes(needle) ? "" : "none";
+      }
+    });
+  })();
+  </script>
+{% endif %}
+
+{% endblock %}

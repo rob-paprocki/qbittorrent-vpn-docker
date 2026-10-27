@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}env-editor{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">torrent-stack <span class="dim">· env-editor</span></div>
+    <nav>
+      <a href="{{ url_for('form_page') }}" {% if request.endpoint == 'form_page' %}class="on"{% endif %}>Settings</a>
+      <a href="{{ url_for('indexers_page') }}" {% if request.endpoint and request.endpoint.startswith('indexer') %}class="on"{% endif %}>Indexers</a>
+    </nav>
+  </header>
+  <main>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for cat, msg in messages %}
+        <div class="flash flash-{{ cat }}">{{ msg }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block body %}{% endblock %}
+  </main>
+</body>
+</html>
