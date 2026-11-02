@@ -70,6 +70,7 @@ The `FILEBROWSER_PORT` compose binding is `0.0.0.0:${FILEBROWSER_PORT}` by defau
 ## Operational notes
 
 * **Image tags.** Every image in `compose.yaml` is on a rolling tag (`:latest`, or `:stable` for FileBrowser); Watchtower pulls nightly. Pin a specific version in `compose.yaml` if reproducibility matters more than auto-update — see `UPSTREAMS.md` for the per-image rollback recipe. The Gluetun image is the one worth watching: provider env-variable renames have shipped as minor bumps there.
+* **Updating by hand.** From the stack folder, `docker compose pull` and then `docker compose up -d` recreates any container whose image changed. Watchtower does the same on `WATCHTOWER_SCHEDULE` in `.env`.
 * **Watchtower fork.** `containrrr/watchtower` was archived on 2025-12-17 at `v1.7.1`. This stack runs `ghcr.io/nicholas-fedor/watchtower:latest`, the active community fork, which is drop-in compatible on env and labels. The Watchtower here is not fronted by `docker-socket-proxy`: it performs updates, so it would need `POST` allowed anyway, which the proxy would have to grant.
 * **IPv6.** Disabled via a Docker sysctl on the gluetun service (`net.ipv6.conf.all.disable_ipv6=1`), which propagates to every container on `network_mode: service:gluetun`. The host's IPv6 is untouched.
 
