@@ -9,6 +9,7 @@ Designed to drop into the Docker VM provisioned by the companion repo [docker-pv
 * Docker Engine 20.10+ with the Docker Compose plugin
 * `/dev/net/tun` available on the host (loaded automatically on most Linux kernels)
 * `NET_ADMIN` capability (granted via `cap_add` in the compose file)
+* Python 3.9 or later with the `venv` module (on Debian, Ubuntu and Proxmox, the `python3-venv` package), for the setup editor. You can skip it and edit `.env` by hand; see [Doing it manually](#doing-it-manually-without-the-editor)
 * A VPN provider that supports port forwarding through Gluetun; the port-update flow depends on it. Gluetun currently covers ProtonVPN, Private Internet Access, Perfect Privacy, and PrivateVPN. NordVPN, Mullvad, and AirVPN are not supported on this path: the stack will connect, but qBittorrent's listen port will stay at 0 and nothing will seed.
 
 See the current list in Gluetun's wiki: <https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/vpn-port-forwarding.md>
