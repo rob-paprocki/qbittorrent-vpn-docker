@@ -9,7 +9,7 @@ Designed to drop into the Docker VM provisioned by the companion repo [docker-pv
 * Docker Engine 20.10+ with the Docker Compose plugin
 * `/dev/net/tun` available on the host (loaded automatically on most Linux kernels)
 * `NET_ADMIN` capability (granted via `cap_add` in the compose file)
-* Python 3.9 or later with the `venv` module (on Debian, Ubuntu and Proxmox, the `python3-venv` package), for the setup editor. You can skip it and edit `.env` by hand; see [Doing it manually](#doing-it-manually-without-the-editor)
+* Python 3.9 or later with the `venv` module (on Debian, Ubuntu and Proxmox, the `python3-venv` package), for the setup editor. You can skip the editor and edit `.env` by hand; see [Doing it manually](#doing-it-manually-without-the-editor)
 * A VPN provider that supports port forwarding through Gluetun; the port-update flow depends on it. Gluetun currently covers ProtonVPN, Private Internet Access, Perfect Privacy, and PrivateVPN. NordVPN, Mullvad, and AirVPN are not supported on this path: the stack will connect, but qBittorrent's listen port will stay at 0 and nothing will seed.
 
 See the current list in Gluetun's wiki: <https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/vpn-port-forwarding.md>
@@ -70,7 +70,7 @@ The `FILEBROWSER_PORT` compose binding is `0.0.0.0:${FILEBROWSER_PORT}` by defau
 ## Operational notes
 
 * **Image tags.** Every image in `compose.yaml` is on a rolling tag (`:latest`, or `:stable` for FileBrowser); Watchtower pulls nightly. Pin a specific version in `compose.yaml` if reproducibility matters more than auto-update — see `UPSTREAMS.md` for the per-image rollback recipe. The Gluetun image is the one worth watching: provider env-variable renames have shipped as minor bumps there.
-* **Updating by hand.** From the stack folder, `docker compose pull` and then `docker compose up -d` recreates any container whose image changed. Watchtower does the same on `WATCHTOWER_SCHEDULE` in `.env`.
+* **Updating by hand.** Running `docker compose pull` and then `docker compose up -d` from the stack folder recreates any container whose image changed. Watchtower does the same on `WATCHTOWER_SCHEDULE` in `.env`.
 * **Watchtower fork.** `containrrr/watchtower` was archived on 2025-12-17 at `v1.7.1`. This stack runs `ghcr.io/nicholas-fedor/watchtower:latest`, the active community fork, which is drop-in compatible on env and labels. The Watchtower here is not fronted by `docker-socket-proxy`: it performs updates, so it would need `POST` allowed anyway, which the proxy would have to grant.
 * **IPv6.** Disabled via a Docker sysctl on the gluetun service (`net.ipv6.conf.all.disable_ipv6=1`), which propagates to every container on `network_mode: service:gluetun`. The host's IPv6 is untouched.
 
