@@ -1,8 +1,8 @@
 # qBittorrent + Gluetun VPN Docker Stack
 
-A Docker Compose stack: Gluetun VPN gateway, qBittorrent (LinuxServer), Jackett, FlareSolverr, FileBrowser, and Watchtower. Pushes the VPN's forwarded port into qBittorrent on every reconnect and reports stack events to Discord.
+A Docker Compose stack: Gluetun VPN gateway, qBittorrent (LinuxServer), Jackett, FlareSolverr, FileBrowser, and an optional Watchtower. Pushes the VPN's forwarded port into qBittorrent on every reconnect and reports stack events to Discord.
 
-Designed to drop into the Docker VM provisioned by the companion repo [docker-pve](https://github.com/rob-paprocki/docker-pve) (which pre-installs Dockge, Portainer, and Watchtower under `/opt/stacks/`), but works on any Docker host.
+Designed to drop into the Docker VM provisioned by the companion repo [docker-pve](https://github.com/rob-paprocki/docker-pve) (which pre-installs [Dockhand](https://dockhand.pro) to manage and update the stacks in `/opt/stacks/`, with Dockge as an option), but works on any Docker host.
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ See the current list in Gluetun's wiki: <https://github.com/qdm12/gluetun-wiki/b
 mkdir -p /opt/stacks && cd /opt/stacks
 
 # Clone into a folder named after the compose project (`name: torrent-stack`)
-# and move in. Dockge needs the names to match; see "Deploy via Dockge".
+# and move in. Dockge needs the names to match; see "If you also run Dockge".
 git clone https://github.com/rob-paprocki/qbittorrent-vpn-docker.git torrent-stack
 cd torrent-stack
 
@@ -43,9 +43,16 @@ The editor stays running — same URL, same login — for any future `.env` edit
 
 With the stack up, the editor's **Indexers** tab lists everything in Jackett's catalog. Click **configure** on an indexer, fill in whatever credentials Jackett asks for (public trackers need none; private trackers prompt for passkey/cookie/etc.), save. Jackett's own UI at `http://<host>:${JACKETT_PORT}` still works if you prefer it.
 
-### Deploy via Dockge (recommended on the paired docker-pve VM)
+### Deploy on the paired docker-pve VM (Dockhand)
 
-If the host is the Docker VM produced by [docker-pve](https://github.com/rob-paprocki/docker-pve), clone into `/opt/stacks/torrent-stack` as above and Dockge (at `http://<host>:5001`) lists it as `torrent-stack`. The folder name matters: Dockge names stacks after their folder, while Docker names the project from `name: torrent-stack` in `compose.yaml`. Cloned into the default `qbittorrent-vpn-docker/` folder, the stack shows up twice in Dockge: an inactive `qbittorrent-vpn-docker` entry you can edit, and an active `torrent-stack` entry marked "This stack is not managed by Dockge".
+If the host is the Docker VM produced by [docker-pve](https://github.com/rob-paprocki/docker-pve), clone into `/opt/stacks/torrent-stack` as above, then in Dockhand (`http://<host>:3000`) open **Stacks → Adopt** and select `torrent-stack`. Dockhand edits `compose.yaml` and `.env` where they are, so it and the env-editor always work on the same files.
+
+* **`.env` changes:** use the env-editor. It handles the config seeding and only recycles the services a change affects. Deploying from Dockhand runs the same `docker compose` with a compatible Compose version, so it leaves unchanged containers alone.
+* **Image updates:** Dockhand's nightly update covers this stack, so leave this stack's own Watchtower off (see **Image updates** below). When Dockhand updates `gluetun`, it recreates qBittorrent, Jackett and FlareSolverr onto the new network namespace itself. The next env-editor or `docker compose up` run recreates those dependents once more to settle Compose's view of them; `gluetun` and the VPN connection are not touched.
+
+#### If you also run Dockge
+
+Dockge (at `http://<host>:5001`, when installed) lists the stack as `torrent-stack` if you cloned into `/opt/stacks/torrent-stack` as above. The folder name matters: Dockge names stacks after their folder, while Docker names the project from `name: torrent-stack` in `compose.yaml`. Cloned into the default `qbittorrent-vpn-docker/` folder, the stack shows up twice in Dockge: an inactive `qbittorrent-vpn-docker` entry you can edit, and an active `torrent-stack` entry marked "This stack is not managed by Dockge".
 
 Use Dockge for log tailing and for reading or editing files. Use the env-editor (or `docker compose` on the host) for `.env` changes and restarts: it handles the config seeding and only recycles the services a change affects. Avoid Dockge's **Start**, **Update** and **Deploy** buttons for this stack. Dockge 1.5.0 runs its own bundled Docker Compose (v2.34.0), which computes different config hashes from the host's newer Compose plugin, so each of those buttons recreates every container (here, a VPN reconnect and a qBittorrent restart), and the host's Compose recreates them again the next time it touches them.
 
@@ -57,6 +64,16 @@ The compose file now declares `name: torrent-stack`. Earlier versions let Docker
 docker compose -p qbittorrent-vpn-docker down   # or -p docker-vpn-qbittorrent, whichever you had
 docker compose up -d
 ```
+
+### Upgrading to the optional-Watchtower version
+
+Watchtower now only runs with the `watchtower` Compose profile, which is off by default. An existing Watchtower container keeps running after you update, because `docker compose up` (even with `--remove-orphans`) leaves a profile-disabled service's container alone. Either remove it:
+
+```bash
+docker compose rm -s -f watchtower
+```
+
+or keep it by setting `COMPOSE_PROFILES=watchtower` in `.env` (env-editor: **Watchtower → Run Watchtower: on**).
 
 ### Moving an existing clone to the `torrent-stack` folder
 
@@ -86,9 +103,9 @@ The `FILEBROWSER_PORT` compose binding is `0.0.0.0:${FILEBROWSER_PORT}` by defau
 
 ## Operational notes
 
-* **Image tags.** Every image in `compose.yaml` is on a rolling tag (`:latest`, or `:stable` for FileBrowser); Watchtower pulls nightly. Pin a specific version in `compose.yaml` if reproducibility matters more than auto-update — see `UPSTREAMS.md` for the per-image rollback recipe. The Gluetun image is the one worth watching: provider env-variable renames have shipped as minor bumps there.
-* **Watchtower fork.** `containrrr/watchtower` was archived on 2025-12-17 at `v1.7.1`. This stack runs `ghcr.io/nicholas-fedor/watchtower:latest`, the active community fork, which is drop-in compatible on env and labels. The Watchtower here is not fronted by `docker-socket-proxy`: it performs updates, so it would need `POST` allowed anyway, which the proxy would have to grant.
-* **Restart gluetun with its dependents, never alone.** qBittorrent, Jackett and FlareSolverr share gluetun's network namespace. Restarting only the `gluetun` container (Portainer's per-container Restart button, or `docker restart`) leaves them with no network until they are recreated too. The env-editor already recycles them together; from the CLI, `docker compose up -d --force-recreate gluetun qbittorrent jackett flaresolverr`.
+* **Image tags.** Every image in `compose.yaml` is on a rolling tag (`:latest`, or `:stable` for FileBrowser), pulled nightly by Dockhand on the docker-pve VM or by this stack's optional Watchtower. Pin a specific version in `compose.yaml` if reproducibility matters more than auto-update — see `UPSTREAMS.md` for the per-image rollback recipe. The Gluetun image is the one worth watching: provider env-variable renames have shipped as minor bumps there.
+* **Image updates.** On the docker-pve VM, Dockhand's nightly update covers this stack: it blocks an update whose image has more known vulnerabilities than the running one, and reconnects the containers that share gluetun's network. On a host with no other updater, turn on this stack's own Watchtower: env-editor **Watchtower → Run Watchtower: on**, or `COMPOSE_PROFILES=watchtower` in `.env`. It runs `ghcr.io/nicholas-fedor/watchtower:latest`, the active community fork of `containrrr/watchtower` (archived 2025-12-17 at `v1.7.1`), and only touches this stack's containers (`scope=torrent-stack`).
+* **Restart gluetun with its dependents, never alone.** qBittorrent, Jackett and FlareSolverr share gluetun's network namespace. Restarting only the `gluetun` container (a per-container Restart button in a Docker UI, or `docker restart`) leaves them with no network until they are recreated too. The env-editor already recycles them together; from the CLI, `docker compose up -d --force-recreate gluetun qbittorrent jackett flaresolverr`.
 * **IPv6.** Disabled via a Docker sysctl on the gluetun service (`net.ipv6.conf.all.disable_ipv6=1`), which propagates to every container on `network_mode: service:gluetun`. The host's IPv6 is untouched.
 
 ## License
