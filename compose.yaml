@@ -115,14 +115,16 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.scope=torrent-stack"
 
-  # Watchtower: containrrr was archived Dec 2025 at v1.7.1; switched to
+  # Watchtower, off by default: on the paired docker-pve VM, Dockhand
+  # applies image updates. It only runs when the `watchtower` profile is
+  # active (COMPOSE_PROFILES=watchtower in .env), for hosts with no other
+  # updater. containrrr was archived Dec 2025 at v1.7.1; this is
   # nicholas-fedor's active community fork, drop-in compatible on env and
-  # labels. Not fronted by docker-socket-proxy here because this instance
-  # performs updates (recreate requires POST /containers/create), so a
-  # read-only proxy would need to allow POST and would not meaningfully
-  # reduce authority. The paired docker-pve stack places a POST=0 proxy
-  # in front of its monitor-only watchtower where it does pay off.
+  # labels. Not fronted by docker-socket-proxy: it performs updates
+  # (recreate requires POST /containers/create), so a read-only proxy would
+  # need to allow POST and would not meaningfully reduce authority.
   watchtower:
+    profiles: ["watchtower"]
     image: ghcr.io/nicholas-fedor/watchtower:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

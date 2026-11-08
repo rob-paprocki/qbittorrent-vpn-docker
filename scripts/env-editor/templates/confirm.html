@@ -48,7 +48,15 @@
           {% for s in services %}<code>{{ s }}</code>{{ ", " if not loop.last }}{% endfor %}
           <br><span class="dim small">(<code>docker compose up -d {{ services|join(' ') }}</code>)</span>
         </li>
-      {% else %}
+      {% endif %}
+      {% if remove %}
+        <li>
+          Stop and remove:
+          {% for s in remove %}<code>{{ s }}</code>{{ ", " if not loop.last }}{% endfor %}
+          <br><span class="dim small">(<code>docker compose rm -s -f {{ remove|join(' ') }}</code>)</span>
+        </li>
+      {% endif %}
+      {% if not services and not remove %}
         <li class="dim">No services need recycling.</li>
       {% endif %}
     </ul>

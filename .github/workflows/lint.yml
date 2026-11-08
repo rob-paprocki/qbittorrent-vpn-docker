@@ -39,7 +39,9 @@ jobs:
               if '=' in line:
                   defs.add(line.split('=', 1)[0])
           missing = refs - defs
-          unused = defs - refs
+          # Compose reads COMPOSE_PROFILES from .env itself; compose.yaml
+          # never references it.
+          unused = defs - refs - {"COMPOSE_PROFILES"}
           if missing: print(f"referenced in compose but missing from .env.example: {sorted(missing)}"); sys.exit(1)
           if unused: print(f"defined in .env.example but unused in compose: {sorted(unused)}"); sys.exit(1)
           print("env <-> compose symmetric")

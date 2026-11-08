@@ -130,14 +130,15 @@ def preview():
     current = env_io.parse_env(ENV_PATH)
     changed = {k: (current.get(k, ""), v) for k, v in submitted.items()
                if current.get(k, "") != v}
-    services, seeders = restart_map.resolve(set(changed.keys()))
+    services, seeders, remove = restart_map.resolve(set(changed.keys()), submitted)
     session["pending"] = submitted
     return render_template(
         "confirm.html",
         changed=changed,
         services=services,
         seeders=seeders,
-        full_restart=sorted(services) == sorted(restart_map.STACK),
+        remove=remove,
+        full_restart=sorted(services) == sorted(restart_map.all_services(submitted)),
     )
 
 
@@ -151,7 +152,7 @@ def apply():
 
     current = env_io.parse_env(ENV_PATH)
     changed_keys = {k for k, v in submitted.items() if current.get(k, "") != v}
-    services, seeders = restart_map.resolve(changed_keys)
+    services, seeders, remove = restart_map.resolve(changed_keys, submitted)
 
     env_io.write_env(ENV_PATH, ENV_EXAMPLE, submitted)
 
@@ -194,6 +195,20 @@ def apply():
             log.append(proc.stdout.strip())
         if proc.returncode != 0:
             log.append(f"[exit {proc.returncode}] {proc.stderr.strip()}")
+
+    if remove:
+        # A service whose profile was switched off keeps running until it is
+        # removed: `up` never touches it again.
+        proc = subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "rm", "-s", "-f", *remove],
+            cwd=str(REPO), capture_output=True, text=True, timeout=180,
+        )
+        log.append(f"docker compose rm -s -f {' '.join(remove)}")
+        output = (proc.stdout + proc.stderr).strip()
+        if output:
+            log.append(output)
+        if proc.returncode != 0:
+            log.append(f"[exit {proc.returncode}]")
 
     return render_template("applied.html", log=log, services=services)
 
