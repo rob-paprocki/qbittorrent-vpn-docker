@@ -50,13 +50,13 @@ GitHub Actions references in `.github/workflows/*.yml` **are** pinned, and those
 
 ### `scripts/env-editor` runtime
 
-A host-side Python app, not a container, so no image to pin. Dependencies installed into a venv at `scripts/env-editor/.venv/` on first `./scripts/setup.sh` run.
+A host-side Python app, not a container, so no image to pin. Dependencies installed into a venv at `scripts/env-editor/.venv/` by `./scripts/setup.sh`, which rebuilds it whenever `requirements.txt` changes or an earlier build failed partway (it compares the file's sha256 with `.venv/.requirements.sha256`, written after a successful install).
 
-- **Python**: 3.9+ (any version on PATH; `scripts/setup.sh` auto-picks the newest `python3*` it finds).
+- **Python**: 3.9+ with the `venv` module (`python3-venv` on Debian/Ubuntu); any version on PATH, `scripts/setup.sh` auto-picks the newest `python3*` it finds.
 - **PyPI deps**: `flask`, `bcrypt`, `requests` — see `scripts/env-editor/requirements.txt`.
 - **qBittorrent search plugin**: `scripts/env-editor/seed_configs.py` downloads `jackett.py` from <https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/jackett.py> on first seed. Delete `./configs/qbittorrent/qBittorrent/nova3/engines/jackett.py` to refetch.
 - **Breaking signals:** Jackett's `/api/v2.0/indexers/<id>/config` schema — the Indexers tab is schema-driven, so a Jackett API change there would show up as a form that no longer validates against Jackett when submitted.
-- **Pin / rollback:** edit `requirements.txt` and `rm -rf scripts/env-editor/.venv` to rebuild.
+- **Pin / rollback:** edit `requirements.txt`; the next `./scripts/setup.sh` run rebuilds the venv.
 
 ### GitHub Actions
 

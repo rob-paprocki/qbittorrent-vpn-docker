@@ -9,6 +9,7 @@ Designed to drop into the Docker VM provisioned by the companion repo [docker-pv
 * Docker Engine 20.10+ with the Docker Compose plugin
 * `/dev/net/tun` available on the host (loaded automatically on most Linux kernels)
 * `NET_ADMIN` capability (granted via `cap_add` in the compose file)
+* For the setup editor: Python 3.9+ with the `venv` module. On Debian/Ubuntu that means `python3` plus `python3-venv`; Debian 13 cloud images, including VMs from older docker-pve versions, ship without `python3-venv` (`sudo apt-get install -y python3-venv`).
 * A VPN provider that supports port forwarding through Gluetun; the port-update flow depends on it. Gluetun currently covers ProtonVPN, Private Internet Access, Perfect Privacy, and PrivateVPN. NordVPN, Mullvad, and AirVPN are not supported on this path: the stack will connect, but qBittorrent's listen port will stay at 0 and nothing will seed.
 
 See the current list in Gluetun's wiki: <https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/vpn-port-forwarding.md>
@@ -19,9 +20,10 @@ See the current list in Gluetun's wiki: <https://github.com/qdm12/gluetun-wiki/b
 # Pick a stacks dir (the paired docker-pve VM uses /opt/stacks/).
 mkdir -p /opt/stacks && cd /opt/stacks
 
-# Clone and move in.
-git clone https://github.com/rob-paprocki/qbittorrent-vpn-docker.git
-cd qbittorrent-vpn-docker
+# Clone into a folder named after the compose project (`name: torrent-stack`)
+# and move in. Dockge needs the names to match; see "Deploy via Dockge".
+git clone https://github.com/rob-paprocki/qbittorrent-vpn-docker.git torrent-stack
+cd torrent-stack
 
 # Prep host-side state dirs so the containers can write them as PUID/PGID.
 mkdir -p configs downloads/incomplete
@@ -43,7 +45,9 @@ With the stack up, the editor's **Indexers** tab lists everything in Jackett's c
 
 ### Deploy via Dockge (recommended on the paired docker-pve VM)
 
-If the host is the Docker VM produced by [docker-pve](https://github.com/rob-paprocki/docker-pve), clone into `/opt/stacks/` as above and Dockge (at `http://<host>:5001`) will auto-discover `torrent-stack`. Dockge is handy for log tailing and ad-hoc text edits to `compose.yaml`; the env-editor is still the recommended path for `.env` changes because it handles the config-seeding and smart-restart.
+If the host is the Docker VM produced by [docker-pve](https://github.com/rob-paprocki/docker-pve), clone into `/opt/stacks/torrent-stack` as above and Dockge (at `http://<host>:5001`) lists it as `torrent-stack`. The folder name matters: Dockge names stacks after their folder, while Docker names the project from `name: torrent-stack` in `compose.yaml`. Cloned into the default `qbittorrent-vpn-docker/` folder, the stack shows up twice in Dockge: an inactive `qbittorrent-vpn-docker` entry you can edit, and an active `torrent-stack` entry marked "This stack is not managed by Dockge".
+
+Use Dockge for log tailing and for reading or editing files. Use the env-editor (or `docker compose` on the host) for `.env` changes and restarts: it handles the config seeding and only recycles the services a change affects. Avoid Dockge's **Start**, **Update** and **Deploy** buttons for this stack. Dockge 1.5.0 runs its own bundled Docker Compose (v2.34.0), which computes different config hashes from the host's newer Compose plugin, so each of those buttons recreates every container (here, a VPN reconnect and a qBittorrent restart), and the host's Compose recreates them again the next time it touches them.
 
 ### Upgrading from a pre-`name: torrent-stack` deployment
 
@@ -52,6 +56,20 @@ The compose file now declares `name: torrent-stack`. Earlier versions let Docker
 ```bash
 docker compose -p qbittorrent-vpn-docker down   # or -p docker-vpn-qbittorrent, whichever you had
 docker compose up -d
+```
+
+### Moving an existing clone to the `torrent-stack` folder
+
+If you cloned into the default `qbittorrent-vpn-docker/` folder, stop the env-editor (Ctrl+C) and move the checkout. Relative paths (`./configs`, `./downloads`) move with it.
+
+```bash
+cd /opt/stacks/qbittorrent-vpn-docker
+docker compose down
+cd /opt/stacks
+mv qbittorrent-vpn-docker torrent-stack
+cd torrent-stack
+docker compose up -d
+./scripts/setup.sh   # restart the env-editor from the new folder
 ```
 
 ## Doing it manually (without the editor)
@@ -70,6 +88,7 @@ The `FILEBROWSER_PORT` compose binding is `0.0.0.0:${FILEBROWSER_PORT}` by defau
 
 * **Image tags.** Every image in `compose.yaml` is on a rolling tag (`:latest`, or `:stable` for FileBrowser); Watchtower pulls nightly. Pin a specific version in `compose.yaml` if reproducibility matters more than auto-update — see `UPSTREAMS.md` for the per-image rollback recipe. The Gluetun image is the one worth watching: provider env-variable renames have shipped as minor bumps there.
 * **Watchtower fork.** `containrrr/watchtower` was archived on 2025-12-17 at `v1.7.1`. This stack runs `ghcr.io/nicholas-fedor/watchtower:latest`, the active community fork, which is drop-in compatible on env and labels. The Watchtower here is not fronted by `docker-socket-proxy`: it performs updates, so it would need `POST` allowed anyway, which the proxy would have to grant.
+* **Restart gluetun with its dependents, never alone.** qBittorrent, Jackett and FlareSolverr share gluetun's network namespace. Restarting only the `gluetun` container (Portainer's per-container Restart button, or `docker restart`) leaves them with no network until they are recreated too. The env-editor already recycles them together; from the CLI, `docker compose up -d --force-recreate gluetun qbittorrent jackett flaresolverr`.
 * **IPv6.** Disabled via a Docker sysctl on the gluetun service (`net.ipv6.conf.all.disable_ipv6=1`), which propagates to every container on `network_mode: service:gluetun`. The host's IPv6 is untouched.
 
 ## License
