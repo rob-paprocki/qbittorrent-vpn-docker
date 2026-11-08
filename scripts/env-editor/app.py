@@ -212,9 +212,11 @@ def apply():
             submitted["QBITTORRENT_USER"],
             submitted["QBITTORRENT_PASSWORD"],
         )
+        # In Docker mode Jackett always listens on 9117 inside the shared
+        # Gluetun network; JACKETT_PORT is only the host-side port that
+        # compose.yaml publishes. qBittorrent reaches Jackett from inside.
         seed_configs.seed_qbit_jackett_wiring(
-            config_root, api_key, "127.0.0.1",
-            int(submitted.get("JACKETT_PORT", "9117")),
+            config_root, api_key, "127.0.0.1", 9117,
         )
         log.append("Seeded qBittorrent.conf (PBKDF2 + search plugin)")
 
