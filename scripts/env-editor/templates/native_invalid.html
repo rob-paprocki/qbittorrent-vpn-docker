@@ -1,0 +1,20 @@
+{# Native (systemd) mode only: the submitted values were refused by
+   native/lib/render.py before anything was saved. #}
+{% extends "base.html" %}
+{% block title %}Not saved — env-editor{% endblock %}
+{% block body %}
+
+<h1>Not saved</h1>
+
+<div class="flash flash-error">These settings cannot be used by the native install, so nothing was saved and nothing was restarted.</div>
+
+<section class="card">
+  <h2>What is wrong</h2>
+  <pre class="log">{{ problem }}</pre>
+</section>
+
+<div class="actions">
+  <a href="{{ url_for('form_page') }}" class="button">← Back to settings</a>
+</div>
+
+{% endblock %}

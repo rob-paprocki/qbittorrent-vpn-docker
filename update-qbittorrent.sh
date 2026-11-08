@@ -3,6 +3,8 @@
 # Invoked by Gluetun whenever a new forwarded VPN port is assigned.
 # Reads the port, logs in to qBittorrent, pushes the port into qBittorrent's
 # preferences, and reports the outcome to a Discord webhook.
+# Docker: mounted into the gluetun container at /gluetun/update-qbittorrent.sh.
+# Native (native/install.sh): run by Gluetun as /bin/sh <repo>/update-qbittorrent.sh.
 
 set -u
 
@@ -10,7 +12,16 @@ QBIT_HOST="localhost"
 QBIT_PORT="$QBIT_WEBUI_PORT"
 QBIT_USER="$QBITTORRENT_USER"
 QBIT_PASS="$QBITTORRENT_PASSWORD"
-NOTIFY_URL="$SCRIPT_NOTIFY_URL"
+NOTIFY_URL="${SCRIPT_NOTIFY_URL:-}"
+
+# notify JSON: post to the Discord webhook. Skipped when no webhook is set,
+# or when it is still the .env.example placeholder (posting there only fails).
+notify() {
+    case "$NOTIFY_URL" in
+        ''|*/webhooks/your_id/your_token) return 0 ;;
+    esac
+    wget -q -O- --header='Content-Type: application/json' --post-data "$1" "$NOTIFY_URL"
+}
 
 NEW_PORT=$(cat /tmp/gluetun/forwarded_port 2>/dev/null || true)
 case "$NEW_PORT" in
@@ -40,7 +51,7 @@ done
 
 if [ "$COUNTER" -eq 24 ]; then
     echo "ERROR: qBittorrent did not become available after 120 seconds." >&2
-    wget -q -O- --header='Content-Type: application/json' --post-data '{"content":"qBittorrent Startup Error: the Gluetun port-update script could not reach qBittorrent after 120 seconds."}' "$NOTIFY_URL"
+    notify '{"content":"qBittorrent Startup Error: the Gluetun port-update script could not reach qBittorrent after 120 seconds."}'
     exit 1
 fi
 
@@ -52,10 +63,14 @@ LOGIN_RESPONSE=$(wget -q --save-cookies "$COOKIE_FILE" --keep-session-cookies \
     --post-data "username=$QBIT_USER&password=$QBIT_PASS" \
     --header "Referer: http://$QBIT_HOST:$QBIT_PORT" \
     -O - "http://$QBIT_HOST:$QBIT_PORT/api/v2/auth/login")
+LOGIN_STATUS=$?
 
-if [ "$LOGIN_RESPONSE" != "Ok." ]; then
+# qBittorrent up to 5.2 answers a good login with "Ok."; 5.3 and later
+# answer "204 No Content" with an empty body. A bad login is "Fails." (old)
+# or HTTP 401, which makes wget exit non-zero (new).
+if [ "$LOGIN_STATUS" -ne 0 ] || { [ "$LOGIN_RESPONSE" != "Ok." ] && [ -n "$LOGIN_RESPONSE" ]; }; then
     echo "ERROR: failed to log in to qBittorrent. Response: $LOGIN_RESPONSE" >&2
-    wget -q -O- --header='Content-Type: application/json' --post-data '{"content":"qBittorrent Login Error: the Gluetun port-update script could not log in. Check QBITTORRENT_USER/QBITTORRENT_PASSWORD."}' "$NOTIFY_URL"
+    notify '{"content":"qBittorrent Login Error: the Gluetun port-update script could not log in. Check QBITTORRENT_USER/QBITTORRENT_PASSWORD."}'
     exit 1
 fi
 
@@ -64,6 +79,6 @@ wget -q --load-cookies "$COOKIE_FILE" \
     --post-data "json={\"listen_port\": $NEW_PORT}" \
     -O /dev/null "http://$QBIT_HOST:$QBIT_PORT/api/v2/app/setPreferences"
 echo "qBittorrent listening port updated."
-wget -q -O- --header='Content-Type: application/json' --post-data "{\"content\":\"qBittorrent port updated. New forwarded port: $NEW_PORT.\"}" "$NOTIFY_URL"
+notify "{\"content\":\"qBittorrent port updated. New forwarded port: $NEW_PORT.\"}"
 echo "----------------------------------------"
 exit 0

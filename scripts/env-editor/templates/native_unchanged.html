@@ -1,0 +1,22 @@
+{# Native (systemd) mode only: the form was submitted without changes. #}
+{% extends "base.html" %}
+{% block title %}Confirm — env-editor{% endblock %}
+{% block body %}
+
+<h1>Review changes</h1>
+
+<p class="dim">Nothing changed. <a href="{{ url_for('form_page') }}">Back</a>.</p>
+
+<section class="card">
+  <h2>Apply again?</h2>
+  <p>If an earlier Apply failed or timed out, the values in <code>.env</code> may be saved but not yet in use. Applying again re-renders every config file from <code>.env</code>, re-seeds qBittorrent's login, and restarts the whole stack (<code>native/install.sh apply --seed=qbit</code>). The env-editor itself keeps running.</p>
+</section>
+
+<form method="post" action="{{ url_for('apply') }}">
+  <div class="actions">
+    <a href="{{ url_for('form_page') }}" class="button">← Back</a>
+    <button type="submit" class="primary">Apply again</button>
+  </div>
+</form>
+
+{% endblock %}

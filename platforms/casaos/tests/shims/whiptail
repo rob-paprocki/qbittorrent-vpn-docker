@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+#
+# platforms/casaos/tests/shims/whiptail - non-interactive stand-in for
+# whiptail, for testing the wizard in platforms/casaos/install.sh. Same
+# contract as platforms/truenas/tests/shims/whiptail (copied and adapted):
+#
+# The answer of an input, password or menu box goes to stderr; yes/no and
+# Cancel are the exit status (0 = OK/Yes, 1 = Cancel/No). Answers come from
+# environment variables named after the box title (upper case, anything but
+# A-Z and 0-9 turned into _):
+#   WT_<TITLE>_<N>   answer the N-th time that title is shown
+#   WT_<TITLE>       answer every other time
+# Text for input/password boxes, the tag for menus, yes/no for yes/no boxes.
+# Without one it takes the box's default. Each box is logged to
+# $CASAOS_SHIM_STATE/whiptail.log (password answers masked). A password box
+# with initial text is refused: that text would be on a command line.
+#
+# License: MIT (see LICENSE in the repository root).
+
+set -Eeuo pipefail
+state="${CASAOS_SHIM_STATE:?}"
+title="" box="" text="" init="" defaultno=0 default_item=""
+while (($#)); do
+  case "$1" in
+  --title) title=$2; shift 2 ;;
+  --backtitle) shift 2 ;;
+  --default-item) default_item=$2; shift 2 ;;
+  --defaultno) defaultno=1; shift ;;
+  --yesno | --msgbox) box=${1#--}; text=$2; shift 4 ;;
+  --inputbox | --passwordbox)
+    box=${1#--}; text=$2; shift 4
+    if (($#)); then init=$1; shift; fi
+    ;;
+  --menu)
+    box=menu; text=$2; shift 5
+    if [[ -z "$default_item" && $# -gt 0 ]]; then default_item=$1; fi
+    shift $#
+    ;;
+  *) echo "whiptail shim: unexpected argument '$1'" >&2; exit 2 ;;
+  esac
+done
+[[ "$box" == passwordbox && -n "$init" ]] && {
+  echo "whiptail shim: a password box got initial text (it would be on the command line)" >&2
+  exit 3
+}
+key=$(printf '%s' "$title" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')
+count_file="$state/whiptail.count.$key"
+n=$(($(cat "$count_file" 2>/dev/null || echo 0) + 1))
+echo "$n" >"$count_file"
+var_n="WT_${key}_${n}" var_any="WT_${key}"
+if [[ -n "${!var_n+x}" ]]; then
+  answer=${!var_n}
+elif [[ -n "${!var_any+x}" ]]; then
+  answer=${!var_any}
+else
+  case "$box" in
+  yesno) answer=$([[ $defaultno == 1 ]] && echo no || echo yes) ;;
+  inputbox | passwordbox) answer=$init ;;
+  menu) answer=$default_item ;;
+  *) answer="" ;;
+  esac
+fi
+shown=$answer
+[[ "$box" == passwordbox && -n "$answer" ]] && shown="(hidden)"
+printf '%s\t%s\t%s\n' "$box" "$title" "$shown" >>"$state/whiptail.log"
+case "$box" in
+yesno) [[ "$answer" == yes ]] && exit 0 || exit 1 ;;
+msgbox) exit 0 ;;
+*) printf '%s' "$answer" >&2 ;;
+esac
+: "$text"

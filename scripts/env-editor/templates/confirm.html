@@ -46,7 +46,11 @@
             Recycle:
           {% endif %}
           {% for s in services %}<code>{{ s }}</code>{{ ", " if not loop.last }}{% endfor %}
+          {%- if native %}
+          <br><span class="dim small">(stops the <code>torrent-&lt;service&gt;</code> systemd units, re-renders their configs from <code>.env</code>, then starts them again: <code>native/install.sh apply {{ services|join(' ') }}</code>)</span>
+          {%- else %}
           <br><span class="dim small">(<code>docker compose up -d {{ services|join(' ') }}</code>)</span>
+          {%- endif %}
         </li>
       {% endif %}
       {% if remove %}
@@ -59,6 +63,9 @@
       {% if not services and not remove %}
         <li class="dim">No services need recycling.</li>
       {% endif %}
+      {%- if native %}
+        <li class="dim">Native install: the kill switch and FileBrowser's login are re-rendered from <code>.env</code> on every Apply. Gluetun and the apps behind it stay stopped while the VPN credentials are still the <code>.env.example</code> placeholders.</li>
+      {%- endif %}
     </ul>
   </section>
 

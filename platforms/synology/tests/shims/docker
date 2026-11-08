@@ -1,0 +1,468 @@
+#!/usr/bin/python3
+"""Test shim for the docker CLI, used by platforms/synology/tests/run-tests.sh.
+
+Purpose: stand in for Container Manager's docker and docker-compose inside a
+throwaway Debian test container, where there is no Docker daemon. It does
+just enough of what platforms/synology/install.sh and boot.sh use:
+
+  * `compose ... config` runs the REAL docker-compose binary (REAL_COMPOSE),
+    so .env quoting, paths and profiles are validated by Compose itself;
+    `up`, `stop`, `down` and `pull` are validated the same way first, then
+    simulated: every running "container" is a real `sleep` process, and the
+    apps that use network_mode: service:gluetun really join gluetun's
+    network namespace (nsenter), so the installers' namespace checks see
+    what they would see on a NAS;
+  * `ps`, `inspect`, `info`, `version`, `image inspect`, `pull`, `rm`;
+  * `run` for the two throwaway containers install.sh starts: the seeding
+    container runs the repository's seeding CLI with the system python3
+    (no pip, .env mounted read-only, only the jackett and qbit seeders),
+    and the write check runs its shell snippet as the given uid:gid
+    (setpriv). Both check that the folders they need are mounted at the same
+    path, as install.sh's real `docker run` relies on;
+  * `logs` for FileBrowser prints the first-run password line the real
+    image logs (FAKE_DOCKER_DIR/fb-password, default fb-first-run-pw).
+
+Every call is appended to $FAKE_DOCKER_DIR/calls.log. Test-only commands:
+`docker __fake restart-gluetun | fail-apps | stop-all | kill-all`.
+Installed as /usr/local/bin/docker and /usr/local/bin/docker-compose (the
+standalone form, used when FAKE_DOCKER_DIR/no-compose-plugin exists).
+
+Copyright (c) 2025-2026 Rob Paprocki
+License: MIT (see LICENSE in the repository root)
+"""
+import json
+import os
+import secrets
+import shlex
+import signal
+import subprocess
+import sys
+
+STATE_DIR = os.environ.get("FAKE_DOCKER_DIR", "/var/lib/fake-docker")
+STATE = os.path.join(STATE_DIR, "state.json")
+ROOT = os.path.join(STATE_DIR, "root")
+REAL_COMPOSE = os.environ.get("REAL_COMPOSE", "/opt/real-compose/docker-compose")
+APPS_IN_GLUETUN = ("qbittorrent", "jackett", "flaresolverr")
+
+
+def log_call(argv):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, "calls.log"), "a", encoding="utf-8") as fh:
+        fh.write(" ".join(shlex.quote(a) for a in argv) + "\n")
+
+
+def flag(name):
+    return os.path.exists(os.path.join(STATE_DIR, name))
+
+
+def load():
+    try:
+        with open(STATE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return {"containers": {}, "images": []}
+
+
+def save(st):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(st, fh, indent=1)
+    os.replace(tmp, STATE)
+    # Docker's own per-container file, read by boot.sh for
+    # HasBeenManuallyStopped (compact JSON, like dockerd writes it).
+    for cid, c in st["containers"].items():
+        d = os.path.join(ROOT, "containers", cid)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "config.v2.json"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ID": cid, "HasBeenManuallyStopped": c["manually_stopped"]},
+                                separators=(",", ":")))
+
+
+def alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            return fh.read().split()[2] != "Z"
+    except OSError:
+        return False
+
+
+def refresh(st):
+    for c in st["containers"].values():
+        if c["running"] and not alive(c["pid"]):
+            c["running"], c["pid"] = False, 0
+
+
+def kill(c):
+    if c.get("pid") and alive(c["pid"]):
+        try:
+            os.kill(c["pid"], signal.SIGKILL)
+            os.waitpid(c["pid"], 0)
+        except (OSError, ChildProcessError):
+            pass
+    c["running"], c["pid"] = False, 0
+
+
+def spawn(cmd):
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    return p.pid
+
+
+def find(st, project, service):
+    for c in st["containers"].values():
+        if c["project"] == project and c["service"] == service:
+            return c
+    return None
+
+
+def start(st, c):
+    if c["service"] in APPS_IN_GLUETUN:
+        gl = find(st, c["project"], "gluetun")
+        if not gl or not gl["running"]:
+            sys.stderr.write(f"Error response from daemon: cannot join network of a non running container: {c['name']}\n")
+            return False
+        c["pid"] = spawn(["nsenter", "-t", str(gl["pid"]), "-n", "sleep", "infinity"])
+        c["network_mode"] = "container:" + gl["id"]
+    else:
+        c["pid"] = spawn(["unshare", "-n", "sleep", "infinity"])
+    c["running"], c["manually_stopped"] = True, False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# docker compose
+# ---------------------------------------------------------------------------
+def compose(args, argv0):
+    if args and args[0] == "version":
+        out = subprocess.run([REAL_COMPOSE, "version", *args[1:]], capture_output=True, text=True)
+        sys.stdout.write(out.stdout)
+        return out.returncode
+    # Global options, as install.sh and boot.sh pass them.
+    glob, i, project, files = [], 0, None, []
+    while i < len(args) and args[i].startswith("-"):
+        a = args[i]
+        if a in ("-p", "--project-name", "-f", "--file", "--env-file", "--profile", "--project-directory"):
+            glob += [a, args[i + 1]]
+            if a in ("-p", "--project-name"):
+                project = args[i + 1]
+            if a in ("-f", "--file"):
+                files.append(os.path.abspath(args[i + 1]))
+            i += 2
+        else:
+            sys.stderr.write(f"fake docker compose: unexpected global option {a}\n")
+            return 2
+    sub, rest = (args[i], args[i + 1:]) if i < len(args) else ("", [])
+    if sub == "config":
+        return subprocess.run([REAL_COMPOSE, *glob, "config", *rest]).returncode
+    # Everything else must at least be a valid project for real Compose.
+    chk = subprocess.run([REAL_COMPOSE, *glob, "config", "-q"])
+    if chk.returncode != 0:
+        return chk.returncode
+    if project is None:
+        name = subprocess.run([REAL_COMPOSE, *glob, "config"], capture_output=True, text=True).stdout
+        project = next((ln.split(":", 1)[1].strip() for ln in name.splitlines() if ln.startswith("name:")), "default")
+    services = subprocess.run([REAL_COMPOSE, *glob, "config", "--services"], capture_output=True,
+                              text=True).stdout.split()
+    st = load()
+    refresh(st)
+    if sub == "up":
+        if flag("fail-up"):
+            sys.stderr.write("dependency failed to start: container torrent-stack-gluetun-1 is unhealthy\n")
+            return 1
+        opts = [a for a in rest if a.startswith("-")]
+        named = [a for a in rest if not a.startswith("-")]
+        if "-d" not in opts and "--detach" not in opts:
+            sys.stderr.write("fake docker compose: up without -d would block\n")
+            return 2
+        targets = named or services
+        if named and "--no-deps" not in opts and any(s in APPS_IN_GLUETUN for s in named):
+            targets = ["gluetun"] + targets
+        order = sorted(set(targets), key=lambda s: (s != "gluetun", s))
+        for svc in order:
+            if svc not in services:
+                sys.stderr.write(f"no such service: {svc}\n")
+                return 1
+            c = find(st, project, svc)
+            if c and "--force-recreate" in opts:
+                kill(c)
+                del st["containers"][c["id"]]
+                c = None
+            if c is None:
+                cid = secrets.token_hex(32)
+                c = {"id": cid, "name": f"{project}-{svc}-1", "project": project, "service": svc,
+                     "config_files": ",".join(files), "running": False, "pid": 0,
+                     "manually_stopped": False, "network_mode": "bridge"}
+                st["containers"][cid] = c
+            if not c["running"] and not start(st, c):
+                save(st)
+                return 1
+        save(st)
+        return 0
+    if sub == "stop":
+        for c in st["containers"].values():
+            if c["project"] == project and (not rest or c["service"] in rest):
+                kill(c)
+                c["manually_stopped"] = True
+        save(st)
+        return 0
+    if sub == "down":
+        for cid in [k for k, c in st["containers"].items() if c["project"] == project]:
+            kill(st["containers"][cid])
+            del st["containers"][cid]
+        save(st)
+        return 0
+    if sub == "pull":
+        return 0
+    sys.stderr.write(f"fake docker compose: unsupported subcommand {sub}\n")
+    return 2
+
+
+# ---------------------------------------------------------------------------
+# docker
+# ---------------------------------------------------------------------------
+def label_value(c, key):
+    return {
+        "com.docker.compose.project": c["project"],
+        "com.docker.compose.service": c["service"],
+        "com.docker.compose.project.config_files": c["config_files"],
+    }.get(key, "")
+
+
+def ps(args):
+    st = load()
+    refresh(st)
+    save(st)
+    show_all = quiet = no_trunc = False
+    filters, fmt, i = [], None, 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-a", "--all"):
+            show_all = True
+        elif a in ("-q", "--quiet"):
+            quiet = True
+        elif a == "--no-trunc":
+            no_trunc = True
+        elif a == "-aq":
+            show_all = quiet = True
+        elif a == "--filter":
+            filters.append(args[i + 1])
+            i += 1
+        elif a == "--format":
+            fmt = args[i + 1]
+            i += 1
+        else:
+            sys.stderr.write(f"fake docker ps: unsupported {a}\n")
+            return 2
+        i += 1
+    for c in st["containers"].values():
+        if not show_all and not c["running"]:
+            continue
+        ok = True
+        for f in filters:
+            k, _, v = f.partition("=")
+            if k == "label":
+                lk, _, lv = v.partition("=")
+                ok &= label_value(c, lk) == lv
+            elif k == "status":
+                ok &= (v == "running") == c["running"]
+            else:
+                ok = False
+        if not ok:
+            continue
+        if fmt:
+            out = fmt.replace('{{.Label "com.docker.compose.project.config_files"}}', c["config_files"])
+            out = out.replace("{{.Names}}", c["name"])
+            print(out)
+        else:
+            print(c["id"] if no_trunc else c["id"][:12])
+    return 0
+
+
+def inspect(args):
+    fmt = None
+    if args[:1] == ["-f"] or args[:1] == ["--format"]:
+        fmt, args = args[1], args[2:]
+    st = load()
+    refresh(st)
+    save(st)
+    rc = 0
+    for ref in args:
+        c = next((c for c in st["containers"].values()
+                  if c["id"].startswith(ref) or c["name"] == ref), None)
+        if c is None:
+            sys.stderr.write(f"Error: No such object: {ref}\n")
+            rc = 1
+            continue
+        out = (fmt or "{{.Id}}")
+        out = out.replace("{{.State.Running}}", "true" if c["running"] else "false")
+        out = out.replace("{{.State.Pid}}", str(c["pid"]))
+        out = out.replace("{{.Name}}", "/" + c["name"]).replace("{{.Id}}", c["id"])
+        out = out.replace("{{.HostConfig.NetworkMode}}", c["network_mode"])
+        print(out)
+    return rc
+
+
+def run(args):
+    i, mounts, user, image, network, entrypoint = 0, [], None, None, None, None
+    while i < len(args):
+        a = args[i]
+        if a == "--rm":
+            i += 1
+        elif a == "--name":
+            i += 2
+        elif a == "--entrypoint":
+            entrypoint = args[i + 1]
+            i += 2
+        elif a in ("-v", "--volume"):
+            mounts.append(args[i + 1])
+            i += 2
+        elif a == "--network":
+            network = args[i + 1]
+            i += 2
+        elif a == "--user":
+            user = args[i + 1]
+            i += 2
+        elif a.startswith("-"):
+            sys.stderr.write(f"fake docker run: unsupported option {a}\n")
+            return 2
+        else:
+            image, rest = a, args[i + 1:]
+            break
+    if image is None:
+        return 2
+    st = load()
+    if image not in st["images"]:
+        st["images"].append(image)
+        save(st)
+    same_path = {m.split(":")[0] for m in mounts if m.split(":")[0] == m.split(":")[1]}
+    read_only = {m.split(":")[0] for m in mounts if m.endswith(":ro")}
+    if entrypoint == "python3" and any(a.endswith("/seed_configs.py") for a in rest):
+        if flag("fail-seed"):
+            sys.stderr.write("seed_configs: ERROR: URLError: <urlopen error [Errno -3] Temporary failure in name resolution>\n")
+            return 1
+        # python3 -I CLI --env ENV --only SEEDERS
+        if rest[:1] != ["-I"] or "--env" not in rest or "--only" not in rest:
+            sys.stderr.write(f"fake docker run: unexpected seeding command {rest}\n")
+            return 1
+        cli, env = rest[1], rest[rest.index("--env") + 1]
+        if rest[rest.index("--only") + 1] != "jackett,qbit":
+            sys.stderr.write("fake docker run: only the jackett and qbit seeders are expected\n")
+            return 1
+        if not any(cli.startswith(d + "/") for d in same_path):
+            sys.stderr.write(f"fake docker run: {cli} is not mounted at the same path\n")
+            return 1
+        if env not in read_only:
+            sys.stderr.write(f"fake docker run: {env} should be mounted read-only\n")
+            return 1
+        return subprocess.run(["/usr/bin/python3", *rest]).returncode
+    if rest[:1] == ["-c"] and rest[2:3] == ["check"] and user:
+        if network != "none":
+            sys.stderr.write("fake docker run: the write check should have no network\n")
+            return 1
+        for d in rest[3:]:
+            if d not in same_path:
+                sys.stderr.write(f"fake docker run: {d} is not mounted at the same path\n")
+                return 1
+        uid, _, gid = user.partition(":")
+        return subprocess.run(["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups",
+                               "/bin/sh", "-c", rest[1], *rest[2:]]).returncode
+    sys.stderr.write("fake docker run: unexpected container\n")
+    return 2
+
+
+def fake(args):
+    st = load()
+    refresh(st)
+    action = args[0]
+    for c in st["containers"].values():
+        if action == "restart-gluetun" and c["service"] == "gluetun":
+            kill(c)
+            start(st, c)
+        elif action == "fail-apps" and c["service"] in APPS_IN_GLUETUN:
+            kill(c)
+            c["manually_stopped"] = False
+        elif action == "stop-all":
+            kill(c)
+            c["manually_stopped"] = True
+        elif action == "kill-all":
+            kill(c)
+            c["manually_stopped"] = False
+    save(st)
+    return 0
+
+
+def main():
+    argv0 = os.path.basename(sys.argv[0])
+    args = sys.argv[1:]
+    log_call([argv0, *args])
+    if argv0 == "docker-compose":
+        return compose(args, argv0)
+    if not args:
+        return 2
+    cmd, rest = args[0], args[1:]
+    if cmd == "__fake":
+        return fake(rest)
+    if flag("daemon-down") and cmd not in ("version",):
+        sys.stderr.write("Cannot connect to the Docker daemon at unix:///var/run/docker.sock.\n")
+        return 1
+    if cmd == "compose":
+        if flag("no-compose-plugin"):
+            sys.stderr.write("docker: 'compose' is not a docker command.\n")
+            return 1
+        return compose(rest, argv0)
+    if cmd == "info":
+        if rest[:2] == ["-f", "{{.DockerRootDir}}"]:
+            print(ROOT)
+        else:
+            print("Server Version: 24.0.2")
+        return 0
+    if cmd == "version":
+        print("24.0.2")
+        return 0
+    if cmd == "ps":
+        return ps(rest)
+    if cmd == "inspect":
+        return inspect(rest)
+    if cmd == "run":
+        return run(rest)
+    if cmd == "rm":
+        return 0
+    if cmd == "logs":
+        st = load()
+        c = next((c for c in st["containers"].values()
+                  if c["id"].startswith(rest[-1]) or c["name"] == rest[-1]), None)
+        if c is None:
+            sys.stderr.write(f"Error: No such container: {rest[-1]}\n")
+            return 1
+        if c["service"] == "filebrowser" and not flag("fb-no-password"):
+            try:
+                with open(os.path.join(STATE_DIR, "fb-password"), encoding="utf-8") as fh:
+                    pw = fh.read().strip()
+            except FileNotFoundError:
+                pw = "fb-first-run-pw"
+            # The exact line FileBrowser v2.0.2-stable logs.
+            print('2026/11/08 21:12:43 [INFO ] write.go:94: Generated initial admin password for user '
+                  '"admin" (set auth.adminPassword in config to override on future resets): ' + pw)
+        return 0
+    if cmd == "image" and rest[:1] == ["inspect"]:
+        return 0 if rest[1] in load()["images"] else 1
+    if cmd == "pull":
+        st = load()
+        img = rest[-1]
+        if img not in st["images"]:
+            st["images"].append(img)
+        save(st)
+        return 0
+    sys.stderr.write(f"fake docker: unsupported command {cmd}\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,246 @@
+#!/usr/bin/env -S python3 -I
+"""platforms/casaos/tests/shims/docker - stand-in for the docker CLI.
+
+Part of platforms/casaos/tests. License: MIT (see LICENSE in the repository
+root).
+
+Supports exactly the calls platforms/casaos/install.sh makes and fails
+loudly (exit 2) on anything else. Containers come from containers.json in
+$CASAOS_SHIM_STATE, which tests/lib/fake_casaos.py fills when the fake
+CasaOS installs or applies the app. Every call is logged (argv) to
+docker.log so the tests can check no secret was put on a command line.
+
+  docker info [--format {{.ServerVersion}}]
+  docker ps [-a|-q] --filter label=K=V ... [--format TEMPLATE]
+  docker inspect -f {{.State.Pid}}|{{.Image}} ID
+      -> the container's pid (and a $CASAOS_SHIM_PROC/<pid>/ns/net link
+         naming its network namespace, like /proc), or its image id
+  docker stop ID...
+  docker restart ID...
+      -> an app on Gluetun's network rejoins Gluetun's current namespace;
+         qBittorrent migrates its settings as on a real start
+  docker image inspect --format {{.Id}} IMAGE
+  docker pull -q IMAGE
+  docker logs ID
+  docker run --rm --name torrent-stack-seed ... --entrypoint /bin/sh IMAGE
+             -c SCRIPT seed STACK_DIR BCRYPT_SPEC
+      -> runs $CASAOS_SHIM_PYTHON -I STACK_DIR/scripts/env-editor/seed_configs.py
+         --env STACK_DIR/.env, as the real container would.
+"""
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True  # no __pycache__ in the repository
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import fake_apps  # noqa: E402
+
+STATE = Path(os.environ["CASAOS_SHIM_STATE"])
+
+
+def load(name, default):
+    p = STATE / name
+    return json.loads(p.read_text()) if p.exists() else default
+
+
+def save(name, obj):
+    tmp = STATE / (name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=1))
+    tmp.replace(STATE / name)
+
+
+def fail(msg):
+    print(f"docker shim: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def labels_of(c):
+    return {
+        **(c.get("labels") or {}),
+        "com.docker.compose.project": "torrent-stack",
+        "com.docker.compose.service": c["service"],
+        "com.docker.compose.project.config_files": c["config_files"],
+    }
+
+
+def fmt(template, c):
+    lab = labels_of(c)
+    out = re.sub(r'\{\{\.Label "([^"]+)"\}\}', lambda m: lab.get(m.group(1), ""), template)
+    return (out.replace("{{.State}}", c["state"]).replace("{{.Status}}", c["status"])
+            .replace("{{.ID}}", c["id"]))
+
+
+def cmd_ps(args):
+    show_all = quiet = False
+    filters, template = [], None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-a":
+            show_all = True
+        elif a == "-q":
+            quiet = True
+        elif a in ("-aq", "-qa"):
+            show_all = quiet = True
+        elif a == "--filter":
+            filters.append(args[i + 1]); i += 1
+        elif a == "--format":
+            template = args[i + 1]; i += 1
+        else:
+            fail(f"ps: unexpected {a}")
+        i += 1
+    for c in load("containers.json", []):
+        if not show_all and c["state"] != "running":
+            continue
+        lab = labels_of(c)
+        ok = True
+        for f in filters:
+            m = re.fullmatch(r"label=([^=]+)=(.*)", f)
+            if not m:
+                fail(f"ps: unsupported filter {f}")
+            ok &= lab.get(m.group(1)) == m.group(2)
+        if ok:
+            print(c["id"] if quiet else fmt(template or "{{.ID}}", c))
+
+
+def cmd_inspect(args):
+    if len(args) != 3 or args[0] not in ("-f", "--format"):
+        fail(f"inspect: unexpected arguments {args}")
+    template, cid = args[1], args[2]
+    rows = load("containers.json", [])
+    c = next((c for c in rows if c["id"] == cid), None)
+    if c is None:
+        print(f"Error: No such object: {cid}", file=sys.stderr)
+        sys.exit(1)
+    if template == "{{.Image}}":
+        print(c.get("image_id", ""))
+    elif template == "{{.State.Pid}}":
+        if c["state"] != "running":
+            print(0)
+            return
+        proc = os.environ.get("CASAOS_SHIM_PROC")
+        if not proc:
+            fail("inspect: CASAOS_SHIM_PROC (the fake /proc) is not set")
+        ns = Path(proc) / str(c["pid"]) / "ns"
+        ns.mkdir(parents=True, exist_ok=True)
+        link = ns / "net"
+        if link.is_symlink():
+            link.unlink()
+        link.symlink_to(c["netns"])
+        print(c["pid"])
+    else:
+        fail(f"inspect: unsupported template {template}")
+
+
+def cmd_restart(args):
+    rows = load("containers.json", [])
+    cfg = load("config.json", {})
+    gluetun = next((c for c in rows if c["service"] == "gluetun"), None)
+    for c in rows:
+        if c["id"] not in args:
+            continue
+        c["state"], c["status"] = "running", "Up 1 second"
+        c["pid"] = int.from_bytes(secrets.token_bytes(3), "big") + 1000
+        if c["service"] in fake_apps.NETNS_DEPENDENTS and gluetun and not cfg.get("restart_keeps_netns"):
+            c["netns"] = gluetun["netns"]
+        if c["service"] == "qbittorrent" and c.get("qbit_conf"):
+            fake_apps.qbit_start(Path(c["qbit_conf"]))
+        print(c["id"])
+    save("containers.json", rows)
+
+
+def cmd_run(args):
+    # docker run --rm --name X -v STACK:STACK:ro -v ENV:ENV:ro -v CFG:CFG
+    #   --entrypoint python3 IMAGE -I STACK/scripts/env-editor/seed_configs.py ARGS...
+    if "--entrypoint" not in args or args[args.index("--entrypoint") + 1] != "python3":
+        fail(f"run: only the python3 seeding container is supported: {args}")
+    i = args.index("--entrypoint")
+    image = args[i + 2]
+    if not re.fullmatch(r"python:[0-9.]+-slim-[a-z]+@sha256:[0-9a-f]{64}", image):
+        fail(f"run: the image must be pinned by tag and digest: {image}")
+    rest = args[i + 3:]
+    if rest[:1] != ["-I"] or not rest[1].endswith("/scripts/env-editor/seed_configs.py"):
+        fail(f"run: unexpected seeding command {rest}")
+    stack_dir = rest[1][: -len("/scripts/env-editor/seed_configs.py")]
+    mounts = [args[k + 1] for k, a in enumerate(args[:i]) if a == "-v"]
+    if f"{stack_dir}:{stack_dir}:ro" not in mounts:
+        fail("run: the stack folder must be mounted read-only at the same path")
+    env = rest[rest.index("--env") + 1]
+    if f"{env}:{env}:ro" not in mounts and f"{stack_dir}:{stack_dir}:ro" not in mounts:
+        fail("run: .env must be mounted read-only")
+    if rest[rest.index("--only") + 1] != "jackett,qbit":
+        fail("run: only the jackett and qbit seeders are expected (nothing pip-installed)")
+    if "--as-user" not in rest:
+        fail("run: the seeding CLI must switch to PUID:PGID (--as-user)")
+    if any("pip" in a for a in args):
+        fail("run: nothing may be pip-installed in the seeding container")
+    py = os.environ.get("CASAOS_SHIM_PYTHON") or "/usr/bin/python3"
+    with open(STATE / "seed-runs.log", "a") as f:
+        f.write(f"container {image} {stack_dir}\n")
+    rc = subprocess.run([py, *rest]).returncode
+    sys.exit(rc)
+
+
+def main():
+    argv = sys.argv[1:]
+    with open(STATE / "docker.log", "a") as f:
+        f.write(json.dumps(argv) + "\n")
+    cfg = load("config.json", {})
+    if not argv:
+        fail("no arguments")
+    cmd, args = argv[0], argv[1:]
+    if cmd == "info":
+        if cfg.get("docker_down"):
+            print("Cannot connect to the Docker daemon", file=sys.stderr)
+            sys.exit(1)
+        if "--format" in args:
+            print("27.5.1")
+        return
+    if cmd == "ps":
+        return cmd_ps(args)
+    if cmd == "inspect":
+        return cmd_inspect(args)
+    if cmd == "restart":
+        return cmd_restart(args)
+    if cmd == "stop":
+        rows = load("containers.json", [])
+        for c in rows:
+            if c["id"] in args:
+                c["state"], c["status"] = "exited", "Exited (0) 1 second ago"
+                print(c["id"])
+        save("containers.json", rows)
+        return
+    if cmd == "image" and args[:1] == ["inspect"]:
+        images = load("images.json", {})
+        ref = args[-1]
+        if ref not in images:
+            print(f"Error: No such image: {ref}", file=sys.stderr)
+            sys.exit(1)
+        print(images[ref])
+        return
+    if cmd == "pull":
+        ref = args[-1]
+        images = load("images.json", {})
+        if ref not in images or ref in cfg.get("new_images", []):
+            if ref in images:
+                (STATE / "images.changed").write_text("1")
+            images[ref] = "sha256:" + secrets.token_hex(32)
+        save("images.json", images)
+        print(f"docker.io/{ref}")
+        return
+    if cmd == "logs":
+        c = next((c for c in load("containers.json", []) if c["id"] == args[-1]), None)
+        if c and c["service"] == "filebrowser":
+            print('2026/11/08 17:20:46 [INFO ] write.go:94: Generated initial admin password for user '
+                  '"admin" (set auth.adminPassword in config to override on future resets): fb-test-pass')
+        return
+    if cmd == "run":
+        return cmd_run(args)
+    fail(f"unsupported command: {argv}")
+
+
+main()

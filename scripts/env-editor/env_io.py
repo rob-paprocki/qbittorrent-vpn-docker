@@ -143,6 +143,92 @@ def parse_env(path: Path) -> dict[str, str]:
     return out
 
 
+_LITERAL_ASSIGN_RE = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$')
+_DQ_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"', "$": "$"}
+
+
+def _closing_quote(text: str, quote: str, start: int) -> int:
+    """Index of the quote that closes a value opened at text[start - 1], or -1.
+
+    A quote preceded by an odd number of backslashes is escaped.
+    """
+    i = start
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == quote:
+            return i
+        i += 1
+    return -1
+
+
+def parse_env_literal(path: Path) -> dict[str, str]:
+    """Parse .env the way Docker Compose does and return the literal values.
+
+    Used by the seeding CLI, native mode and TrueNAS, which read values back
+    from .env. They must see what Compose (and so Gluetun and
+    update-qbittorrent.sh) sees, or the seeded qBittorrent password and the
+    one the port-forward script logs in with could differ. Compose's rules
+    (https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/#env-file-syntax),
+    checked against `docker compose config`:
+
+    - Blank lines and lines starting with # are skipped; `export KEY=...`
+      is the same as `KEY=...`; when a key appears twice the last one wins.
+    - Unquoted: an inline comment starts at " #" (a space, then #);
+      `pw#1` stays `pw#1`. Surrounding spaces are trimmed.
+    - Double quotes: \\n \\r \\t \\\\ \\" and \\$ are unescaped (write_env
+      writes \\\\ and \\"), other backslashes are kept, and anything after
+      the closing quote (such as `# note`) is ignored. The value may span
+      lines.
+    - Single quotes: taken literally except \\' -> '. May span lines.
+
+    Not done: ${VAR} interpolation, which Compose applies to unquoted and
+    double-quoted values. Avoid $ in such values, or single-quote them.
+    """
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    lines = path.read_text(encoding="utf-8").splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        i += 1
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _LITERAL_ASSIGN_RE.match(raw)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2).lstrip()
+        quote = val[:1]
+        if quote in ('"', "'"):
+            text, end = val, _closing_quote(val, quote, 1)
+            j = i
+            while end < 0 and j < len(lines):   # a quoted value may span lines
+                text += "\n" + lines[j]
+                j += 1
+                end = _closing_quote(text, quote, 1)
+            if end >= 0:
+                i = j
+                body = text[1:end]
+                if quote == '"':
+                    val = re.sub(r'\\(.)', lambda e: _DQ_ESCAPES.get(e.group(1), e.group(0)),
+                                 body, flags=re.S)
+                else:
+                    val = body.replace("\\'", "'")
+                out[key] = val
+                continue
+            # No closing quote anywhere (Compose would refuse the file):
+            # fall through and take the line as an unquoted value.
+        cut = val.find(" #")
+        if cut >= 0:
+            val = val[:cut]
+        out[key] = val.strip()
+    return out
+
+
 def write_env(env_path: Path, example_path: Path, values: dict[str, str]) -> None:
     """Write .env using the example as a template.
 

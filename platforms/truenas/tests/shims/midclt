@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""
+platforms/truenas/tests/shims/midclt - stand-in for TrueNAS's midclt, for
+testing platforms/truenas/install.sh.
+
+Accepts the command line of `midclt call` in TrueNAS 25.10 (options -q,
+-j/--job, -jp/--job-print; then the method and its arguments, each read as
+JSON when it parses and as a plain string otherwise) and prints the result
+the same way: an int or string (a bool counts as an int there) as is,
+anything else as one line of JSON. Errors go to stderr with exit status 1.
+The call itself is checked and answered by tests/lib/fake_middleware.py.
+
+Written for these tests (the real midclt is part of truenas/api_client).
+License: MIT (see LICENSE in the repository root).
+"""
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import fake_middleware  # noqa: E402
+
+
+def main(argv):
+    args = list(argv)
+    # Global options before the sub-command (accepted, not used here).
+    while args and args[0] in ("-u", "--uri", "-U", "--username", "-P", "--password",
+                                "-K", "--api-key", "-t", "--timeout"):
+        args = args[2:]
+    if not args or args[0] != "call":
+        print("midclt shim: only `midclt call` is supported", file=sys.stderr)
+        return 2
+    args = args[1:]
+    job = False
+    while args and args[0].startswith("-"):
+        opt = args.pop(0)
+        if opt in ("-j", "--job"):
+            job = True
+        elif opt in ("-q", "--quiet"):
+            pass
+        elif opt in ("-jp", "--job-print"):
+            if not args or args[0] not in ("progressbar", "description"):
+                print("midclt: -jp needs progressbar or description", file=sys.stderr)
+                return 2
+            args.pop(0)
+        else:
+            print(f"midclt: unrecognized option {opt}", file=sys.stderr)
+            return 2
+    if not args:
+        print("midclt: the following arguments are required: method", file=sys.stderr)
+        return 2
+    method, raw = args[0], args[1:]
+    params = []
+    for item in raw:
+        try:
+            params.append(json.loads(item))
+        except ValueError:
+            params.append(item)
+
+    def progress(jobinfo):
+        print(jobinfo["progress"]["description"], file=sys.stderr)
+
+    try:
+        rv = fake_middleware.call(method, params, job=job, via="midclt",
+                                  argv=["midclt"] + list(argv), callback=progress)
+    except fake_middleware.CallError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if isinstance(rv, (int, str)):
+        print(rv)
+    else:
+        print(json.dumps(rv))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

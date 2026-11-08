@@ -1,0 +1,14 @@
+#!/bin/bash
+# Test shim for insmod (platforms/synology/tests). Records the call. With
+# $FAKE_SYNO_DIR/insmod-creates-node, it creates /dev/net/tun the way udev
+# does after the module loads; without it, boot.sh's own mknod fallback has
+# to. The test container's kernel has tun built in, so nothing is loaded.
+# Copyright (c) 2025-2026 Rob Paprocki. License: MIT (see LICENSE).
+set -u
+dir="${FAKE_SYNO_DIR:-/var/lib/fake-syno}"
+echo "insmod $*" >>"$dir/insmod.calls"
+[[ "${1:-}" == /lib/modules/tun.ko ]] || exit 1
+if [[ -e "$dir/insmod-creates-node" ]]; then
+  mkdir -p /dev/net && mknod -m 666 /dev/net/tun c 10 200
+fi
+exit 0
