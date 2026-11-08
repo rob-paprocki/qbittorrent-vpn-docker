@@ -27,7 +27,7 @@
         <select name="{{ f.name }}" id="f-{{ f.name }}">
           {% if f.choices %}
             {% for c in f.choices %}
-              <option value="{{ c }}" {% if c == f.value %}selected{% endif %}>{{ c }}</option>
+              <option value="{{ c }}" {% if c == f.value %}selected{% endif %}>{{ f.choice_labels[c] if f.choice_labels and c in f.choice_labels else c }}</option>
             {% endfor %}
           {% elif f.choices_grouped %}
             {% for group_label, group_choices in f.choices_grouped %}

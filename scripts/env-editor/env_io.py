@@ -94,6 +94,13 @@ FIELDS = [
      "help": "Where port-forward successes/errors ping. Leave blank for no notifications."},
 
     # --- Watchtower ---
+    {"name": "COMPOSE_PROFILES", "section": "Watchtower", "type": "select",
+     "label": "Run Watchtower",
+     "choices": ["", "watchtower"],
+     "choice_labels": {"": "off — Dockhand or another updater handles image updates",
+                       "watchtower": "on — this stack's own Watchtower updates it"},
+     "help": "Off on the docker-pve VM, where Dockhand applies image updates. "
+             "The settings below only apply while this is on."},
     {"name": "WATCHTOWER_NOTIFICATION_URL", "section": "Watchtower", "type": "text",
      "label": "Shoutrrr notification URL",
      "help": "e.g. discord://token@webhook_id — scheme auto-detected."},
