@@ -6,7 +6,8 @@
 # mode with Flask's test client: what it refuses before saving and what its
 # Apply writes. Nothing runs against a real stack: the app works on a
 # throwaway copy of the repo, and `docker` is a stub that logs its
-# arguments. No root, no containers.
+# arguments (and on `stop qbittorrent` writes qBittorrent.conf over, as
+# qBittorrent does). No root needed, no containers.
 #
 #   bash scripts/env-editor/tests/run-tests.sh
 #
@@ -48,6 +49,12 @@ mkdir -p "$WORK/shim"
 cat >"$WORK/shim/docker" <<'EOF'
 #!/bin/sh
 printf '%s\n' "docker $*" >>"$DOCKER_LOG"
+# Like qBittorrent, which writes the settings it holds in memory back to
+# its config when it stops: a login seeded before the stop is lost.
+case "$*" in
+  *" stop qbittorrent")
+    if [ -f "$QBIT_CONF" ]; then printf '[Preferences]\nWebUI\\Username=in-memory\n' >"$QBIT_CONF"; fi ;;
+esac
 EOF
 chmod +x "$WORK/shim/docker"
 # One login for every copy: admin / test-pass.
@@ -69,6 +76,7 @@ for mode in docker native; do
   echo '# stub' >"$fx/configs/qbittorrent/qBittorrent/nova3/engines/jackett.py"
   echo "== $mode mode"
   if ! (cd "$WORK" && PATH="$WORK/shim:$PATH" TS_MODE="$mode" DOCKER_LOG="$WORK/$mode-docker.log" \
+        QBIT_CONF="$fx/configs/qbittorrent/qBittorrent/qBittorrent.conf" \
         "$PY" -I -B "$HERE/test_app.py" "$fx" 2>&1); then
     FAIL=1
   fi

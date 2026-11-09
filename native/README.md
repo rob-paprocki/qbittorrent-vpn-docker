@@ -647,7 +647,7 @@ Tested and passed:
   FileBrowser admin (bcrypt)" line and the new FileBrowser note.
   `scripts/env-editor/tests/run-tests.sh` (Flask's test client, a stub
   `docker`, no root) checks what the env-editor refuses before saving and
-  what its Apply writes: 6 tests in Docker mode and 3 in native mode, all
+  what its Apply writes: 13 tests in Docker mode and 4 in native mode, all
   passing. CI does not run it yet (it needs Flask).
 - Boot order after a reboot: the kill switch loaded before `network-pre.target`
   and before every service; everything came back up, app DNS view ok.
@@ -686,7 +686,7 @@ local git server; details in those READMEs):
   `parse_env_literal` and the Unraid, Synology and CasaOS `env_get` with
   `docker compose config` on 30 cases (all equal), checks that the
   seeding CLI only installs the search plugin from the pinned commit with
-  the pinned sha256, and checks the qBittorrent login rules on 25 cases
+  the pinned sha256, and checks the qBittorrent login rules on 28 cases
   (both modes), that the CLI has no FileBrowser seeder (`--only
   filebrowser` exits 2) and that a password change still restarts
   FileBrowser.

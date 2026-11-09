@@ -3,9 +3,11 @@
 Run by run-tests.sh, which builds the fixture repo FIXTURE (a copy of
 scripts/env-editor, .env.example, compose.yaml and native/versions.env,
 plus configs/env-editor/credentials.json for admin:test-pass) and puts a
-`docker` stub that logs its arguments to $DOCKER_LOG first on PATH:
+`docker` stub that logs its arguments to $DOCKER_LOG first on PATH. On
+`stop qbittorrent` the stub writes $QBIT_CONF over, as qBittorrent writes
+the settings it holds in memory back when it stops:
 
-    TS_MODE=docker|native DOCKER_LOG=... python3 -B test_app.py FIXTURE
+    TS_MODE=docker|native DOCKER_LOG=... QBIT_CONF=... python3 -B test_app.py FIXTURE
 
 What is checked:
   * Docker and native mode refuse a QBITTORRENT_PASSWORD FileBrowser cannot
@@ -16,9 +18,12 @@ What is checked:
     one an installer wrote in single quotes); native mode lets those
     through (an unset login means "not set up yet" there).
   * Docker-mode Apply seeds qBittorrent and Jackett but writes nothing for
-    FileBrowser, creates <CONFIG_PATH>/filebrowser when it is missing, and
-    a new password still recreates FileBrowser. A password with quotes and
-    backslashes reads back unchanged on the next save.
+    FileBrowser, and a new password still recreates FileBrowser. It stops
+    qBittorrent before seeding it. It creates <CONFIG_PATH>/filebrowser
+    when it is missing (mode 2775, as root owned by PUID:PGID), without
+    following a symlink put in its place, and only logs what it could not
+    create. A password with quotes and backslashes reads back unchanged on
+    the next save.
 """
 from __future__ import annotations
 
@@ -28,6 +33,7 @@ import shutil
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 FIXTURE = Path(sys.argv.pop(1)).resolve()
 sys.path.insert(0, str(FIXTURE / "scripts" / "env-editor"))
@@ -188,9 +194,10 @@ class DockerMode(Base):
                 self.assertIn("Username=rob", QBIT_CONF.read_text())
                 self.assertEqual(env_io.parse_env_literal(editor.ENV_PATH)["QBITTORRENT_PASSWORD"], pw)
                 calls = DOCKER_LOG.read_text().splitlines()
-                self.assertEqual(len(calls), 1, calls)
-                self.assertIn(" up -d ", calls[0])
-                self.assertIn(" filebrowser", calls[0])
+                self.assertEqual(len(calls), 2, calls)
+                self.assertTrue(calls[0].endswith(" stop qbittorrent"), calls)
+                self.assertIn(" up -d ", calls[1])
+                self.assertIn(" filebrowser", calls[1])
 
     def test_quotes_and_backslashes_survive_a_later_save(self) -> None:
         for pw in ('pa"ss\\w1', '"\\"\\' + "x" * 66):   # the second is 70 bytes
@@ -206,25 +213,104 @@ class DockerMode(Base):
                                       if l.startswith("QBITTORRENT_PASSWORD=")], line)
                     self.assertEqual(env_io.parse_env_literal(editor.ENV_PATH)["QBITTORRENT_PASSWORD"], pw)
 
-    def test_apply_creates_the_filebrowser_folder(self) -> None:
-        # Docker would create a missing bind-mount source as root, where
-        # FileBrowser (uid 1000) cannot write its database.
+    def alt_config(self) -> Path:
+        """An empty CONFIG_PATH of its own, with the search plugin in place."""
         alt = FIXTURE / "altcfg"
         self.addCleanup(shutil.rmtree, alt, True)
         engines = alt / "qbittorrent" / "qBittorrent" / "nova3" / "engines"
         engines.mkdir(parents=True)
         (engines / "jackett.py").write_text("# stub\n")   # nothing is downloaded
+        return alt
+
+    def test_qbittorrent_is_stopped_before_it_is_seeded(self) -> None:
+        # qBittorrent writes its old settings back when it stops (the stub
+        # does the same): seeded before the stop, the new login was lost.
+        self.apply(form(QBITTORRENT_USER="rob", QBITTORRENT_PASSWORD="Good-pass-1"))
+        DOCKER_LOG.write_text("")
+        _, applied = self.apply(form(QBITTORRENT_USER="rob2", QBITTORRENT_PASSWORD="Good-pass-2"))
+        self.assertIn("docker compose stop qbittorrent", applied)
+        calls = DOCKER_LOG.read_text().splitlines()
+        self.assertEqual(len(calls), 2, calls)
+        self.assertTrue(calls[0].endswith(" stop qbittorrent"), calls)
+        self.assertEqual(calls[1].split(" up -d ", 1)[1].split(),
+                         ["filebrowser", "gluetun", "qbittorrent"])
+        conf = QBIT_CONF.read_text()
+        self.assertIn("Username=rob2", conf)
+        self.assertNotIn("in-memory", conf)
+        # A change that does not touch the login leaves qBittorrent running.
+        DOCKER_LOG.write_text("")
+        self.apply(form(SERVER_COUNTRIES="Switzerland"))
+        self.assertNotIn(" stop ", DOCKER_LOG.read_text())
+        # Apply with nothing changed seeds again, so it starts qBittorrent too.
+        DOCKER_LOG.write_text("")
+        self.pending(form())
+        page = self.client.post("/apply", headers=AUTH)
+        self.assertIn("<h1>Applied</h1>", page.get_data(as_text=True))
+        self.assertEqual(DOCKER_LOG.read_text().splitlines()[1].split(" up -d ", 1)[1].split(),
+                         ["qbittorrent"])
+        self.assertIn("Username=rob2", QBIT_CONF.read_text())
+
+    def test_apply_creates_the_filebrowser_folder(self) -> None:
+        # Docker would create a missing bind-mount source as root, where
+        # FileBrowser (uid 1000, group PGID) cannot write its database.
+        alt = self.alt_config()
         _, applied = self.apply(form(QBITTORRENT_USER="rob", QBITTORRENT_PASSWORD="Good-pass-1",
-                                     CONFIG_PATH=str(alt)))
+                                     PUID="1001", PGID="1002", CONFIG_PATH=str(alt)))
         fb = alt / "filebrowser"
         self.assertTrue(fb.is_dir())
         self.assertEqual(fb.stat().st_mode & 0o7777, 0o2775)
+        if os.geteuid() == 0:
+            # As the Unraid, Synology and CasaOS installers make it.
+            self.assertEqual((fb.stat().st_uid, fb.stat().st_gid), (1001, 1002))
         self.assertIn(f"Created {fb}", applied)
         # One that exists is left as it is.
         fb.chmod(0o750)
         _, applied = self.apply(form(SERVER_COUNTRIES="Switzerland"))
         self.assertEqual(fb.stat().st_mode & 0o7777, 0o750)
         self.assertNotIn("Created", applied)
+
+    def test_a_filebrowser_folder_it_cannot_make_is_only_logged(self) -> None:
+        # .env is written by then: Apply must still bring the stack up.
+        alt = self.alt_config()
+        fb = alt / "filebrowser"
+        cases = [   # each with a new country, so there is something to apply
+            ("dangling symlink", lambda: fb.symlink_to(alt / "not-mounted"), "it is a symlink", "Sweden"),
+            ("regular file", lambda: fb.write_text("x\n"), "File exists", "Norway"),
+        ]
+        for name, make, needle, country in cases:
+            with self.subTest(name):
+                if fb.is_symlink() or fb.exists():
+                    fb.unlink()
+                make()
+                DOCKER_LOG.write_text("")
+                _, applied = self.apply(form(QBITTORRENT_USER="rob", QBITTORRENT_PASSWORD="Good-pass-1",
+                                             CONFIG_PATH=str(alt), SERVER_COUNTRIES=country))
+                self.assertIn(needle, applied)
+                self.assertIn("Make it a folder (owner PUID:PGID, mode 2775)", applied)
+                self.assertIn(" up -d ", DOCKER_LOG.read_text())
+                self.assertFalse(fb.is_dir())
+
+    def test_a_folder_swapped_for_a_symlink_changes_nothing_else(self) -> None:
+        # Someone who may write in CONFIG_PATH replaces the new folder with
+        # a symlink right after it is made: its target keeps its mode.
+        alt = self.alt_config()
+        fb = alt / "filebrowser"
+        victim = alt / "victim"
+        victim.write_text("secret\n")
+        victim.chmod(0o600)
+        real_mkdir = os.mkdir
+
+        def racing_mkdir(path, *args, **kwargs):
+            real_mkdir(path, *args, **kwargs)
+            if Path(path) == fb:
+                os.rmdir(path)
+                os.symlink(victim, path)
+        with mock.patch.object(editor.os, "mkdir", racing_mkdir):
+            _, applied = self.apply(form(QBITTORRENT_USER="rob", QBITTORRENT_PASSWORD="Good-pass-1",
+                                         CONFIG_PATH=str(alt)))
+        self.assertEqual(victim.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(victim.read_text(), "secret\n")
+        self.assertIn(f"Could not set up {fb}", applied)
 
     def test_password_change_recreates_filebrowser(self) -> None:
         self.apply(form(QBITTORRENT_USER="rob", QBITTORRENT_PASSWORD="Good-pass-1"))

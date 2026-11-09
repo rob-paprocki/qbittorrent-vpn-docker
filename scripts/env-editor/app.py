@@ -219,6 +219,19 @@ def apply():
     log.append(f"Jackett API key present ({api_key[:4]}…)")
 
     if "qbit" in seeders or not changed_keys:
+        # qBittorrent writes the settings it holds in memory back to
+        # qBittorrent.conf when it stops, so a file seeded while it runs
+        # would lose the new login as `up -d` recreates it. Stop it first;
+        # `up -d` below starts it again on the seeded file.
+        proc = subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "stop", "qbittorrent"],
+            cwd=str(REPO), capture_output=True, text=True, timeout=180,
+        )
+        log.append("docker compose stop qbittorrent")
+        if proc.returncode != 0:
+            log.append(f"[exit {proc.returncode}] {proc.stderr.strip()}")
+        if "qbittorrent" not in services:
+            services = sorted([*services, "qbittorrent"])
         seed_configs.seed_qbittorrent(
             config_root,
             submitted["QBITTORRENT_USER"],
@@ -235,18 +248,10 @@ def apply():
     # FileBrowser is not seeded: compose.yaml hands it QBITTORRENT_PASSWORD
     # as FILEBROWSER_ADMIN_PASSWORD, and it sets user admin's password from
     # that on every start. A changed password recreates it (restart_map).
-    # Its folder must exist before `docker compose up`, though: Docker would
-    # create the missing bind-mount source as root, and FileBrowser (uid
-    # 1000, group PGID) could not write its database there. Made here as
-    # the editor's user, group-writable for a PUID other than 1000.
+    # Its folder must exist before `docker compose up`, though.
     fb_dir = config_root / "filebrowser"
     if not fb_dir.is_dir():
-        fb_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            fb_dir.chmod(0o2775)
-        except OSError:
-            pass
-        log.append(f"Created {fb_dir}")
+        log.append(_make_filebrowser_dir(fb_dir, submitted))
 
     if services:
         proc = subprocess.run(
@@ -455,6 +460,41 @@ def _collect_form(form) -> dict[str, str]:
         else:
             out[name] = (form.get(name) or "").strip()
     return out
+
+
+def _make_filebrowser_dir(fb_dir: Path, env: dict[str, str]) -> str:
+    """Create FileBrowser's missing config folder; return the line to log.
+
+    Docker would create a missing bind-mount source as root, and FileBrowser
+    (uid 1000, group PGID) could not write its database there. The folder
+    gets group PGID (where this user may set it) and mode 2775; when the
+    editor runs as root, owner PUID too, as the Unraid, Synology and CasaOS
+    installers make it. Both are set on a descriptor opened without
+    following symlinks, so a folder swapped for a link in between changes
+    nothing else. A failure is logged, not raised: .env is written by now.
+    """
+    advice = "Make it a folder (owner PUID:PGID, mode 2775) before FileBrowser starts."
+    if fb_dir.is_symlink():
+        return f"Left {fb_dir} alone: it is a symlink that does not lead to a folder. {advice}"
+    try:
+        uid, gid = int(env.get("PUID", "")), int(env.get("PGID", ""))
+        fb_dir.parent.mkdir(parents=True, exist_ok=True)
+        os.mkdir(fb_dir, 0o775)
+        fd = os.open(fb_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if os.geteuid() == 0:
+                os.fchown(fd, uid, gid)
+            else:
+                try:
+                    os.fchown(fd, -1, gid)
+                except PermissionError:   # not a member of group PGID
+                    pass
+            os.fchmod(fd, 0o2775)
+        finally:
+            os.close(fd)
+    except (OSError, ValueError) as e:
+        return f"Could not set up {fb_dir}: {e}. {advice}"
+    return f"Created {fb_dir}"
 
 
 def _jackett_client() -> JackettClient | None:
