@@ -5,9 +5,7 @@ name: installers
 # VPN. Nothing is installed system-wide: the only download is PyYAML, into
 # a venv in $RUNNER_TEMP (a scratch folder the runner deletes after the
 # job), and the scripts only write there, in the checkout and in temporary
-# folders they delete again. Only one command uses sudo: CasaOS's
-# install.sh refuses to run as anyone but root, even for --print-yaml (see
-# that step).
+# folders they delete again. No step needs sudo.
 #
 # Not run here: the full test suites (platforms/*/tests/run-tests.sh) and
 # the end-to-end tests. They need root, private mount namespaces, Incus or
@@ -176,16 +174,12 @@ jobs:
           set_env INCOMPLETE_DOWNLOADS /DATA/Downloads/incomplete
           set_env QBITTORRENT_USER admin
           set_env QBITTORRENT_PASSWORD ci-dummy-password
-          # install.sh stops unless it runs as root (on a real host the
-          # .env holding the VPN key is readable by root only). sudo is
-          # passwordless on GitHub's runners. In this mode the script only
-          # reads files and uses a temporary folder it deletes again.
+          # --print-yaml needs no root (every other action does): it only
+          # reads files and uses a temporary folder it deletes again. (On a
+          # real host .env is readable by root only, so there it is root.)
           # TS_IPV6_SYSCTL=on: keep Gluetun's IPv6 sysctl, as on a kernel
           # with IPv6 (otherwise it depends on the runner's kernel).
-          # The > redirect is done by the runner user, not root, on purpose:
-          # the YAML file belongs to the runner user.
-          # shellcheck disable=SC2024
-          sudo env TS_APPDATA="$appdata" TS_SOURCE_DIR="$GITHUB_WORKSPACE" TS_IPV6_SYSCTL=on \
+          TS_APPDATA="$appdata" TS_SOURCE_DIR="$GITHUB_WORKSPACE" TS_IPV6_SYSCTL=on \
             bash platforms/casaos/install.sh --print-yaml >"$RUNNER_TEMP/casaos/casaos-app.yml"
           docker compose -f "$RUNNER_TEMP/casaos/casaos-app.yml" config -q
           echo "CasaOS app YAML passes docker compose config."

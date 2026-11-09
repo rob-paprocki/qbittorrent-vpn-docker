@@ -52,10 +52,10 @@ AUTH_USER = os.environ.get("ENV_EDITOR_USER", "admin")
 NATIVE = os.environ.get("TS_MODE", "docker").strip().lower() == "native"
 NATIVE_INSTALLER = REPO / "native" / "install.sh"
 
-# Native mode reads .env values literally (undoing write_env's quoting), so
-# a password holding " or \\ survives being shown in the form and saved
-# again. Docker mode keeps the original parser unchanged.
-_parse_env = env_io.parse_env_literal if NATIVE else env_io.parse_env
+# Both modes read .env values as Docker Compose does (undoing write_env's
+# quoting), so a password holding " or \\ survives being shown in the form
+# and saved again, and the login check measures what Compose passes on.
+_parse_env = env_io.parse_env_literal
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -126,17 +126,29 @@ def require_auth(fn):
 def form_page():
     current = _parse_env(ENV_PATH)
     example = _parse_env(ENV_EXAMPLE)
+    return _render_form({f["name"]: current.get(f["name"], example.get(f["name"], ""))
+                         for f in env_io.FIELDS})
+
+
+def _render_form(values: dict[str, str], problem: str | None = None):
+    """The settings form filled with values; with problem, as "Not saved".
+
+    A refused Preview or Apply shows the form again with the values that
+    were submitted, so nothing typed in (a VPN key, say) has to be typed
+    again.
+    """
     sections: dict[str, list[dict]] = {}
     for f in env_io.FIELDS:
-        value = current.get(f["name"], example.get(f["name"], ""))
         entry = dict(f)
-        entry["value"] = value
+        entry["value"] = values.get(f["name"], "")
         sections.setdefault(f["section"], []).append(entry)
     return render_template(
         "form.html",
         sections=sections,
         env_exists=ENV_PATH.exists(),
         env_path=str(ENV_PATH),
+        problem=problem,
+        native=NATIVE,
     )
 
 
@@ -144,6 +156,9 @@ def form_page():
 @require_auth
 def preview():
     submitted = _collect_form(request.form)
+    problem = _values_problem(submitted)
+    if problem:
+        return _render_form(submitted, problem)
     current = _parse_env(ENV_PATH)
     changed = {k: (current.get(k, ""), v) for k, v in submitted.items()
                if current.get(k, "") != v}
@@ -152,9 +167,6 @@ def preview():
     if NATIVE:
         services, seeders, remove, all_services = _native_plan(
             services, seeders, all_services, set(changed))
-        problem = _native_check(submitted)
-        if problem:
-            return render_template("native_invalid.html", problem=problem)
         if not changed:
             # Offer to apply .env again, for example after an Apply that
             # failed half-way (the values were already saved then).
@@ -180,15 +192,15 @@ def apply():
         flash("Session expired — resubmit the form.", "error")
         return redirect(url_for("form_page"))
 
+    # Checked again here, before anything is written: .env.example or the
+    # native install may have changed since the preview.
+    problem = _values_problem(submitted)
+    if problem:
+        return _render_form(submitted, problem)
+
     current = _parse_env(ENV_PATH)
     changed_keys = {k for k, v in submitted.items() if current.get(k, "") != v}
     services, seeders, remove = restart_map.resolve(changed_keys, submitted)
-
-    if NATIVE:
-        # Refuse values the native install cannot use before saving them.
-        problem = _native_check(submitted)
-        if problem:
-            return render_template("native_invalid.html", problem=problem)
 
     env_io.write_env(ENV_PATH, ENV_EXAMPLE, submitted)
 
@@ -220,13 +232,21 @@ def apply():
         )
         log.append("Seeded qBittorrent.conf (PBKDF2 + search plugin)")
 
-    if "filebrowser" in seeders or not changed_keys:
-        seed_configs.seed_filebrowser(
-            config_root,
-            submitted["QBITTORRENT_USER"],
-            submitted["QBITTORRENT_PASSWORD"],
-        )
-        log.append("Seeded FileBrowser admin (bcrypt)")
+    # FileBrowser is not seeded: compose.yaml hands it QBITTORRENT_PASSWORD
+    # as FILEBROWSER_ADMIN_PASSWORD, and it sets user admin's password from
+    # that on every start. A changed password recreates it (restart_map).
+    # Its folder must exist before `docker compose up`, though: Docker would
+    # create the missing bind-mount source as root, and FileBrowser (uid
+    # 1000, group PGID) could not write its database there. Made here as
+    # the editor's user, group-writable for a PUID other than 1000.
+    fb_dir = config_root / "filebrowser"
+    if not fb_dir.is_dir():
+        fb_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            fb_dir.chmod(0o2775)
+        except OSError:
+            pass
+        log.append(f"Created {fb_dir}")
 
     if services:
         proc = subprocess.run(
@@ -330,15 +350,14 @@ def _native_plan(services: list[str], seeders: list[str],
     """Adjust a Docker restart plan for native mode.
 
     Profiled services (Watchtower) do not exist natively: updates are
-    `native/install.sh update`. The FileBrowser seeder is dropped because
-    native/install.sh apply renders FileBrowser's config, admin login
-    included, from .env every time.
+    `native/install.sh update`. FileBrowser has no seeder in either mode:
+    natively, native/install.sh apply renders its admin login from .env
+    every time.
     """
     profiled = set(restart_map.PROFILED)
     extra = {svc for key in changed_keys for svc in NATIVE_EXTRA_RESTARTS.get(key, [])}
     services = sorted((set(services) | extra) - profiled)
     all_services = [s for s in all_services if s not in profiled]
-    seeders = [s for s in seeders if s != "filebrowser"]
     return services, seeders, [], all_services
 
 
@@ -382,6 +401,23 @@ def _apply_native(changed_keys: set[str], services: list[str],
     if proc.returncode != 0:
         log.append(f"[exit {proc.returncode}]")
     return services
+
+
+def _values_problem(submitted: dict[str, str]) -> str | None:
+    """Why the submitted values cannot be saved, or None when they can.
+
+    Both modes check the qBittorrent login (its password is also
+    FileBrowser's admin password) with env_io.login_problems(). Docker mode
+    refuses an empty or placeholder login, and a password with $ (Compose
+    would expand it); native mode reads an unset login as "not set up yet",
+    like native/lib/render.py, and then also asks render.py.
+    """
+    problems = env_io.login_problems(submitted, _parse_env(ENV_EXAMPLE), unset_ok=NATIVE)
+    if problems:
+        return "\n".join(problems)
+    if NATIVE:
+        return _native_check(submitted)
+    return None
 
 
 def _native_check(submitted: dict[str, str]) -> str | None:

@@ -19,6 +19,14 @@
 #    nothing is written, and a qBittorrent 5 conf that has a [WebUI]
 #    section gets the login there too. The download is faked, so no
 #    network is needed.
+# 3. The qBittorrent login rules both env-editor modes check before saving
+#    (env_io.login_problems): QBITTORRENT_PASSWORD is also FileBrowser
+#    Quantum's admin password, so 5 to 72 bytes and not "admin", and Docker
+#    mode refuses the .env.example placeholders and a "$" (Compose would
+#    expand it in the double quotes write_env uses). FileBrowser has no seeder
+#    any more: the CLI refuses --only filebrowser, writes nothing for it,
+#    and a password change still recreates FileBrowser. (The env-editor app
+#    itself, which needs Flask, is tested by scripts/env-editor/tests/.)
 #
 # Copyright (c) 2025-2026 Rob Paprocki
 # License: MIT (see LICENSE in the repository root)
@@ -176,6 +184,106 @@ PY
   ok "plugin from the pinned commit only, a wrong sha256 refused with nothing written, bad pins refused, [WebUI] login written once migrated ($out)"
 else
   bad "seeding CLI checks:"
+  printf '        %s\n' "$out"
+fi
+
+# --- 3. qBittorrent login rules, no FileBrowser seeder ----------------------
+echo "== env_io.login_problems and the seeding CLI without a FileBrowser seeder"
+if out=$(python3 -I -B - "$REPO" "$WORK" <<'PY' 2>&1
+import subprocess, sys
+from pathlib import Path
+repo, work = Path(sys.argv[1]), Path(sys.argv[2])
+sys.path.insert(0, str(repo / "scripts" / "env-editor"))
+import env_io, restart_map
+import seed_configs as sc
+
+example = env_io.parse_env(repo / ".env.example")
+PU, PP = example["QBITTORRENT_USER"], example["QBITTORRENT_PASSWORD"]
+assert PU and PP, "no placeholders in .env.example"
+# (user, password, unset_ok, text every refusal must contain, or None for "accepted")
+cases = [
+    (PU, "Good-pass-1", False, "QBITTORRENT_USER is still the .env.example placeholder"),
+    ("rob", PP, False, "QBITTORRENT_PASSWORD is still the .env.example placeholder"),
+    (PU, PP, False, "QBITTORRENT_PASSWORD is still the .env.example placeholder"),
+    ("", "Good-pass-1", False, "QBITTORRENT_USER is empty"),
+    ("rob", "", False, "QBITTORRENT_PASSWORD is empty"),
+    ("rob", "   ", False, "QBITTORRENT_PASSWORD is empty"),
+    ("rob", "admin", False, 'cannot be "admin"'),
+    ("rob", "abcd", False, "has 4 bytes"),
+    ("rob", "éé", False, "has 4 bytes"),      # 2 characters, 4 bytes
+    ("rob", "x" * 73, False, "has 73 bytes"),
+    ("rob", "é" * 37, False, "has 74 bytes"),
+    ("rob", "abcde", False, None),
+    ("rob", "ééé", False, None),         # 3 characters, 6 bytes: FileBrowser counts bytes
+    ("rob", "x" * 72, False, None),
+    ("rob", "é" * 36, False, None),                # 72 bytes
+    ("rob", "Admin", False, None),                      # FileBrowser compares exactly
+    ("rob", 'pa ss"w\\ord #x', False, None),
+    ("rob", 'pa ss"w\\ord$x', False, 'cannot contain "$"'),
+    ("rob", "admin$xyz", False, 'cannot contain "$"'),
+    # Native mode: an unset login means "not set up yet" (render.py's rule).
+    (PU, PP, True, None),
+    ("rob", "", True, None),
+    ("rob", PP, True, None),
+    ("", "Good-pass-1", True, None),
+    ("rob", "admin", True, 'cannot be "admin"'),
+    ("rob", "abcd", True, "has 4 bytes"),
+    ("rob", "x" * 73, True, "has 73 bytes"),
+    ("rob", "Good-pass-1", True, None),
+    ("rob", 'pa ss"w\\ord$x', True, None),         # natively .env is read literally
+]
+for user, pw, unset_ok, want in cases:
+    got = env_io.login_problems({"QBITTORRENT_USER": user, "QBITTORRENT_PASSWORD": pw},
+                                example, unset_ok)
+    label = f"{user!r}/{pw!r} unset_ok={unset_ok}"
+    if want is None:
+        assert got == [], f"{label} refused: {got}"
+    else:
+        assert got and any(want in p for p in got), f"{label}: {got} lacks {want!r}"
+        if len(pw.strip()) > 1 and pw not in ("admin", PP):
+            assert all(pw not in p for p in got), f"{label}: the password is in the message"
+# A missing key counts as empty.
+assert env_io.login_problems({}, example) == ["QBITTORRENT_USER is empty.",
+                                              "QBITTORRENT_PASSWORD is empty."]
+
+# No FileBrowser seeder: not in the module, refused by the CLI.
+assert not hasattr(sc, "seed_filebrowser") and "filebrowser" not in sc.SEEDERS, sc.SEEDERS
+env = work / "seed.env"
+env.write_text((repo / ".env.example").read_text()
+               .replace(f"QBITTORRENT_USER={PU}", "QBITTORRENT_USER=rob")
+               .replace(f"QBITTORRENT_PASSWORD={PP}", "QBITTORRENT_PASSWORD=Good-pass-1"))
+cli = subprocess.run([sys.executable, "-I", "-B", str(repo / "scripts" / "env-editor" / "seed_configs.py"),
+                      "--env", str(env), "--config-root", str(work / "cli"), "--only", "jackett,filebrowser"],
+                     capture_output=True, text=True)
+assert cli.returncode == 2 and "unknown seeder(s): filebrowser" in cli.stderr, (cli.returncode, cli.stderr)
+assert not (work / "cli").exists(), "a refused --only wrote files"
+# Every seeder (the default): qBittorrent and Jackett, nothing for FileBrowser.
+root = work / "all"
+engines = root / "qbittorrent" / "qBittorrent" / "nova3" / "engines"
+engines.mkdir(parents=True)
+(engines / "jackett.py").write_text("stub")   # installed: nothing is downloaded
+def no_network(*a, **k):
+    raise AssertionError("the seeder tried to download")
+sc.urllib.request.urlopen = no_network
+log = sc.run_seeders(env, root)
+assert not (root / "filebrowser").exists(), "something was written for FileBrowser"
+assert (root / "qbittorrent" / "qBittorrent" / "qBittorrent.conf").is_file()
+assert not any("FileBrowser" in line for line in log), log
+# The placeholder login: qBittorrent is skipped with a warning.
+env.write_text((repo / ".env.example").read_text())
+log = sc.run_seeders(env, work / "placeholder")
+assert any(l.startswith("WARNING:") and "skipped seeding qbit " in l for l in log), log
+assert not (work / "placeholder" / "qbittorrent" / "qBittorrent" / "qBittorrent.conf").exists()
+
+# A new password still recreates FileBrowser, which reads it at every start.
+services, seeders, _ = restart_map.resolve({"QBITTORRENT_PASSWORD"}, {})
+assert "filebrowser" in services and seeders == ["qbit"], (services, seeders)
+print(f"{len(cases)} login cases")
+PY
+); then
+  ok "login rules (placeholders, empty, admin, 5-72 bytes, \$ in Docker mode, native unset login), no FileBrowser seeder, password change recreates FileBrowser ($out)"
+else
+  bad "login rules / FileBrowser seeder checks:"
   printf '        %s\n' "$out"
 fi
 

@@ -1,7 +1,9 @@
 """Read and write .env while preserving comments and ordering.
 
 Field metadata (FIELDS) drives the form rendered by app.py. Each entry
-declares how to prompt for and validate one .env key.
+declares how to prompt for and validate one .env key. login_problems() is
+the one set of rules for the qBittorrent login (which is also FileBrowser's
+admin password) that the env-editor checks in both modes before it saves.
 """
 from __future__ import annotations
 
@@ -88,7 +90,10 @@ FIELDS = [
     {"name": "QBITTORRENT_USER", "section": "qBittorrent", "type": "text", "label": "WebUI username",
      "help": "Used by the port-forward script and seeded into qBittorrent.conf.", "required": True},
     {"name": "QBITTORRENT_PASSWORD", "section": "qBittorrent", "type": "password", "label": "WebUI password",
-     "help": "Hashed into qBittorrent.conf (PBKDF2) and FileBrowser (bcrypt). Also reused as the FileBrowser admin password.",
+     "help": "Hashed into qBittorrent.conf (PBKDF2) on Apply. Also FileBrowser's password for "
+             "user `admin`: FileBrowser sets it from this value every time it starts. "
+             "5 to 72 bytes (letters outside A-Z take 2 to 4 bytes each), not `admin`; "
+             "with Docker Compose also no `$`.",
      "required": True},
     {"name": "SCRIPT_NOTIFY_URL", "section": "qBittorrent", "type": "url", "label": "Discord webhook URL",
      "help": "Where port-forward successes/errors ping. Leave blank for no notifications."},
@@ -115,6 +120,93 @@ FIELDS = [
 ]
 
 FIELD_BY_NAME = {f["name"]: f for f in FIELDS}
+
+
+# ---------------------------------------------------------------------------
+# qBittorrent login rules (shared by the env-editor's Docker and native modes)
+# ---------------------------------------------------------------------------
+
+LOGIN_KEYS = ("QBITTORRENT_USER", "QBITTORRENT_PASSWORD")
+
+# QBITTORRENT_PASSWORD is also FileBrowser Quantum's password for user
+# "admin": compose.yaml passes it as FILEBROWSER_ADMIN_PASSWORD, and the
+# native install hands it to `filebrowser user set admin`. What FileBrowser
+# Quantum does with it (checked in gtsteffaniak/filebrowser v2.0.2-stable):
+#   - "" and "admin" are ignored: ConfigTriggersAdminPasswordReset() in
+#     backend/pkg/settings/auth.go leaves the stored password as it is, and
+#     a new database gets a random one, printed once in the log
+#     (backend/internal/state/bootstrap_admin_password.go).
+#   - Fewer than 5 bytes are refused: ValidatePasswordPolicy() in
+#     backend/pkg/settings/password_policy.go compares Go's len() (bytes)
+#     with auth.methods.password.minLength, default 5
+#     (backend/pkg/settings/config.go). The startup reset logs an error and
+#     keeps the old password (backend/cmd/user.go).
+#   - More than 72 bytes are refused: the password is stored as a bcrypt
+#     hash (backend/internal/utils/crypto.go), and golang.org/x/crypto's
+#     bcrypt.GenerateFromPassword returns ErrPasswordTooLong beyond 72.
+# "admin" is also FileBrowser's well-known default, so both modes refuse it
+# (natively, `filebrowser user set` would accept it).
+FILEBROWSER_PASSWORD_MIN_BYTES = 5
+FILEBROWSER_PASSWORD_MAX_BYTES = 72
+
+
+def _unset(values: dict[str, str], example: dict[str, str], key: str) -> bool:
+    """True when key is empty or still the .env.example value (render.py's rule)."""
+    value = values.get(key, "").strip()
+    return value == "" or value == example.get(key, "").strip()
+
+
+def login_problems(values: dict[str, str], example: dict[str, str],
+                   unset_ok: bool = False) -> list[str]:
+    """Return why QBITTORRENT_USER / QBITTORRENT_PASSWORD cannot be used, or [].
+
+    values: the .env values to check. example: the .env.example values (for
+    the placeholders your_qbit_username / your_qbit_password, which are
+    public). The password itself is never put in a message.
+
+    unset_ok=False (Docker mode): both keys must be set. FileBrowser gets the
+    password on a port published on every interface, so an empty value or
+    the placeholder is refused. So is a password with "$": write_env puts it
+    in double quotes, where Docker Compose expands $name, so Gluetun and
+    FileBrowser would get another password than the one seeded into
+    qBittorrent, and the byte count here would not be FileBrowser's.
+    unset_ok=True (native mode): an empty or placeholder login means "not
+    set up yet", as native/lib/render.py reads it: qBittorrent is not seeded
+    and FileBrowser keeps the first-run password. The password rules apply
+    once both keys are set; "$" is fine there (render.py reads .env
+    literally).
+    """
+    if unset_ok and any(_unset(values, example, k) for k in LOGIN_KEYS):
+        return []
+    problems = []
+    for key in LOGIN_KEYS:
+        if not values.get(key, "").strip():
+            problems.append(f"{key} is empty.")
+        elif _unset(values, example, key):
+            problems.append(f"{key} is still the .env.example placeholder "
+                            f"({example[key].strip()}), which anyone can look up.")
+    if problems:
+        return problems
+    password = values["QBITTORRENT_PASSWORD"]
+    size = len(password.encode("utf-8"))
+    what = "QBITTORRENT_PASSWORD (also FileBrowser's password for user admin)"
+    if password == "admin":
+        problems.append(f"{what} cannot be \"admin\": that is FileBrowser's default "
+                        f"password, and FileBrowser's FILEBROWSER_ADMIN_PASSWORD setting "
+                        f"ignores it (FileBrowser keeps its old password, or makes up "
+                        f"a random one).")
+    elif "$" in password and not unset_ok:
+        problems.append(f"{what} cannot contain \"$\": Docker Compose reads $ in .env as "
+                        f"the start of a variable name, so Gluetun and FileBrowser would "
+                        f"get a shorter password than the one qBittorrent gets.")
+    elif size < FILEBROWSER_PASSWORD_MIN_BYTES:
+        problems.append(f"{what} has {size} bytes; FileBrowser needs at least "
+                        f"{FILEBROWSER_PASSWORD_MIN_BYTES} (5 plain characters).")
+    elif size > FILEBROWSER_PASSWORD_MAX_BYTES:
+        problems.append(f"{what} has {size} bytes; FileBrowser stores a bcrypt hash of "
+                        f"it, which holds at most {FILEBROWSER_PASSWORD_MAX_BYTES}. Letters "
+                        f"outside A-Z take 2 to 4 bytes each.")
+    return problems
 
 
 # ---------------------------------------------------------------------------

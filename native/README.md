@@ -45,7 +45,7 @@ Service names are the same as in `compose.yaml`: `gluetun`, `qbittorrent`,
 8. Builds the env-editor's Python venv from `native/locks/env-editor.txt` (same rules) and creates its first-run password.
 9. Seeds the Jackett API key and the pinned qBittorrent Jackett search plugin (and qBittorrent's login, if `.env` already has real `QBITTORRENT_*` values). This runs as the `torrent` user, see "Who may touch what" below.
 10. Renders the configs and systemd units from `.env`, loads the kill switch, and starts what may start: the env-editor and FileBrowser always; Gluetun, qBittorrent, Jackett and FlareSolverr only once the VPN settings are filled in.
-11. Prints the env-editor URL and its first-run login. The same login is saved in `/root/torrent-stack.creds` (mode 0600). Note it somewhere and delete that file.
+11. Prints the web UI addresses and the env-editor's first-run login. The same login is saved in `/root/torrent-stack.creds` (mode 0600). Note it somewhere and delete that file. With `TS_HOST_SUMMARY=1` in its environment it prints only the login and leaves the addresses out: the Incus script passes this in proxy mode, where the container's own addresses do not work from the LAN, and prints the host addresses to open after the installer's output. The Proxmox script does not pass it: there the container's own address is the one to open.
 
 ### Startup gating
 
@@ -429,10 +429,15 @@ The rest of the Gluetun environment is the one in `compose.yaml`, key for key.
   (checked, like the Gluetun change). `native/lib/flaresolverr-prestart.sh`
   refreshes that copy whenever apt updates chromium.
 - **FileBrowser Quantum**: the release binary, sharing only the downloads
-  folder. The admin user is always `admin`, with password `QBITTORRENT_PASSWORD`
-  (or the env-editor's first-run password until that is set; FileBrowser wants
-  at least 5 characters, and otherwise keeps the previous password with a
-  warning in its journal). On every start,
+  folder. The admin user is always `admin`, with password `QBITTORRENT_PASSWORD`,
+  or the env-editor's first-run password while `QBITTORRENT_USER` or
+  `QBITTORRENT_PASSWORD` is still empty or the `.env.example` placeholder.
+  The env-editor refuses a password FileBrowser cannot use (see the
+  env-editor below). A password put into `.env` by hand is not checked:
+  FileBrowser refuses one under 5 or over 72 bytes, and then keeps its
+  previous password, with a warning from `filebrowser-prestart.sh` in its
+  journal; `admin` it accepts, and that is FileBrowser's well-known default
+  login. On every start,
   `native/lib/filebrowser-prestart.sh` (root) opens the root-only
   `/etc/torrent-stack/filebrowser-admin.pw` and passes it on stdin to
   `filebrowser user set admin --password --admin`, run as `torrent`. The
@@ -448,14 +453,21 @@ The rest of the Gluetun environment is the one in `compose.yaml`, key for key.
   seeded password while it shuts down. The restart list is the same as in
   Docker, plus two native extras: `FILEBROWSER_PORT` also restarts Gluetun
   (its firewall lets that port in), and `FLARESOLVERR_PORT` also restarts
-  Jackett (it stores FlareSolverr's URL). Before saving, the env-editor asks
-  `native/lib/render.py` whether the new values work natively (ports, paths);
-  if not, it shows **Not saved** with the reason and changes nothing. If an
+  Jackett (it stores FlareSolverr's URL). Before saving, on **Preview
+  changes** and again on **Apply**, the env-editor checks the qBittorrent
+  login with the same rules as in Docker mode (`env_io.login_problems()`:
+  the password is also FileBrowser's, so 5 to 72 bytes and not `admin`).
+  Natively an empty or placeholder login is not refused: it means "not set
+  up yet". Nor is a `$`, which Docker mode refuses because Docker Compose
+  would expand it; the native install reads `.env` literally. Then it asks
+  `native/lib/render.py` whether the new values work natively (ports,
+  paths). If either check fails, it shows **Not saved** with the reason
+  above the form, which keeps what you entered, and changes nothing. If an
   Apply fails half-way, `apply` starts the services it had stopped again,
   and pressing Apply without changes offers **Apply again** (re-render
-  everything and restart the stack). The seeding CLI never seeds the
-  `.env.example` placeholder login: with those values qBittorrent's and
-  FileBrowser's logins are left alone, with a warning.
+  everything and restart the stack). The seeding CLI never seeds an empty
+  or `.env.example` placeholder login: qBittorrent's login is then left
+  alone, with a warning, and FileBrowser keeps the first-run password.
 
 ## Differences from the Docker stack
 
@@ -527,7 +539,9 @@ nft list table inet torrent_killswitch              # kill switch rules and coun
   `/etc/resolv.conf` was replaced; the app was restarted. If it keeps
   happening, run `bash native/install.sh apply` once.
 - **The env-editor says "Not saved".** The values cannot work natively (for
-  example a port below 1024); nothing was changed. Fix the value shown.
+  example a port below 1024), or the qBittorrent password is one FileBrowser
+  cannot use (`admin`, under 5 or over 72 bytes); nothing was changed. Fix
+  the value shown.
 - **A warning that a service "is not running" after Apply or update.** It
   crashed right after starting: `journalctl -u torrent-<name> -n 30`.
 
@@ -618,14 +632,23 @@ Tested and passed:
   fine. A lock file whose hashes did not match: pip refused, the old venv and
   the running env-editor stayed. A valid change: built next to the old venv
   and swapped in, env-editor restarted once.
-- Seeding CLI: with the `.env.example` login it skipped qBittorrent and
-  FileBrowser with a warning (exit 0); without bcrypt and with FileBrowser
-  requested it stopped before writing anything (exit 1); `--as-user` read a
-  root-only `.env` and wrote files owned by that user.
-- Docker mode unchanged: the env-editor from git HEAD and the working tree,
-  both without `TS_MODE`, a fake `docker` and pinned randomness, through 8
-  scenarios: all 59 outputs (pages, docker compose calls, `.env`, seeded
-  files) byte-identical.
+- Seeding CLI: with the `.env.example` login it skipped qBittorrent with a
+  warning (exit 0); `--as-user` read a root-only `.env` and wrote files owned
+  by that user.
+- Docker mode: when native mode was added, the env-editor from git HEAD and
+  the working tree, both without `TS_MODE`, a fake `docker` and pinned
+  randomness, gave byte-identical results in 8 scenarios (59 outputs: pages,
+  docker compose calls, `.env`, seeded files). The later removal of the
+  FileBrowser seeder was compared the same way (two starting states, 13
+  Apply steps each): `.env`, `qBittorrent.conf`, `jackett.json`,
+  `ServerConfig.json` and the docker compose calls stayed identical;
+  `configs/filebrowser/settings.yaml` is no longer written (an existing one
+  is left alone), and the pages differ only by the dropped "Seeded
+  FileBrowser admin (bcrypt)" line and the new FileBrowser note.
+  `scripts/env-editor/tests/run-tests.sh` (Flask's test client, a stub
+  `docker`, no root) checks what the env-editor refuses before saving and
+  what its Apply writes: 6 tests in Docker mode and 3 in native mode, all
+  passing. CI does not run it yet (it needs Flask).
 - Boot order after a reboot: the kill switch loaded before `network-pre.target`
   and before every service; everything came back up, app DNS view ok.
 - `uninstall`: units, kill switch, programs, rendered files, tmpfiles and
@@ -661,9 +684,12 @@ local git server; details in those READMEs):
 - A `.env` line `QBITTORRENT_PASSWORD=pw # note` seeds `pw`, like Docker
   Compose. `native/tests/check-env-parsing.sh` compares
   `parse_env_literal` and the Unraid, Synology and CasaOS `env_get` with
-  `docker compose config` on 30 cases (all equal), and checks that the
+  `docker compose config` on 30 cases (all equal), checks that the
   seeding CLI only installs the search plugin from the pinned commit with
-  the pinned sha256.
+  the pinned sha256, and checks the qBittorrent login rules on 25 cases
+  (both modes), that the CLI has no FileBrowser seeder (`--only
+  filebrowser` exits 2) and that a password change still restarts
+  FileBrowser.
 - qBittorrent 5.3 logins through an Incus proxy device whose host port is
   the container port (204), and refused (401) when the Host header names
   another port.

@@ -31,8 +31,6 @@
         {% for s in seeders %}
           {% if s == "qbit" %}
             <li>Re-seed <code>qBittorrent.conf</code> (new PBKDF2 hash + search plugin wiring).</li>
-          {% elif s == "filebrowser" %}
-            <li>Re-seed FileBrowser admin credentials (bcrypt).</li>
           {% else %}
             <li>Run seeder: <code>{{ s }}</code>.</li>
           {% endif %}
@@ -63,6 +61,9 @@
       {% if not services and not remove %}
         <li class="dim">No services need recycling.</li>
       {% endif %}
+      {%- if not native and "QBITTORRENT_PASSWORD" in changed %}
+        <li class="dim">FileBrowser is not seeded: once recreated, it sets user <code>admin</code>'s password from <code>QBITTORRENT_PASSWORD</code> (<code>FILEBROWSER_ADMIN_PASSWORD</code> in <code>compose.yaml</code>).</li>
+      {%- endif %}
       {%- if native %}
         <li class="dim">Native install: the kill switch and FileBrowser's login are re-rendered from <code>.env</code> on every Apply. Gluetun and the apps behind it stay stopped while the VPN credentials are still the <code>.env.example</code> placeholders.</li>
       {%- endif %}

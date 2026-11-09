@@ -1,6 +1,20 @@
+{# With problem set, Preview or Apply refused the submitted values (by
+   env_io.login_problems() in both modes, natively also by
+   native/lib/render.py): the form shows them again, nothing was saved. #}
 {% extends "base.html" %}
-{% block title %}Settings — env-editor{% endblock %}
+{% block title %}{{ "Not saved" if problem else "Settings" }} — env-editor{% endblock %}
 {% block body %}
+
+{% if problem %}
+<h1>Not saved</h1>
+
+<div class="flash flash-error">These settings cannot be used by {{ "the native install" if native else "the stack" }}, so nothing was saved and nothing was restarted. The form below still holds what you entered: correct what is listed here, then press <strong>Preview changes</strong> again.</div>
+
+<section class="card">
+  <h2>What is wrong</h2>
+  <pre class="log">{{ problem }}</pre>
+</section>
+{% endif %}
 
 <div class="banner {% if not env_exists %}banner-first{% endif %}">
   {% if env_exists %}

@@ -834,6 +834,122 @@ echo "  (re-seed through a planted link: exit $RC)"
 check "a link left in a config folder cannot make the installer change a root-owned file" \
   test "$(cat /mnt/tank/victim)" == precious
 check "  ... nor its owner" test "$(owner /mnt/tank/victim)" == 0:0
+
+# ---------------------------------------------------------------------------
+echo "S: the qBittorrent password is also FileBrowser's admin password: not 'admin', 6 characters, 72 bytes"
+CURRENT=S
+# Letters of 2, 3 and 4 bytes in UTF-8 (e-acute, the euro sign, U+1F600),
+# written as bytes so that this file stays ASCII.
+B2=$'\xc3\xa9' B3=$'\xe2\x82\xac' B4=$'\xf0\x9f\x98\x80'
+rep() { # STRING N: STRING N times
+  local s="" i
+  for ((i = 0; i < $2; i++)); do s+=$1; done
+  printf '%s' "$s"
+}
+PW72=$(rep "$B2" 36) # 36 letters, 72 bytes
+PW73="${PW72}a"      # 37 letters, 73 bytes
+# The wizard's check: truenas_app.py password-check, the password on stdin.
+pw_accepted() { printf '%s' "$1" | python3 "$PLATFORM_DIR/truenas_app.py" password-check; }
+pw_refused() { # PASSWORD TEXT: refused, and the reason says TEXT
+  local why
+  why=$(printf '%s' "$1" | python3 "$PLATFORM_DIR/truenas_app.py" password-check) && return 1
+  [[ "$why" == *"$2"* ]]
+}
+check "password check: 'admin' is refused (FileBrowser ignores it)" pw_refused admin "cannot be 'admin'"
+check "password check: 5 characters are refused" pw_refused abcde "must be at least 6 characters"
+check "password check: 6 characters are accepted" pw_accepted abcdef
+check "password check: 72 ASCII letters are accepted" pw_accepted "$(rep a 72)"
+check "password check: 73 ASCII letters are refused" pw_refused "$(rep a 73)" "is 73 bytes long"
+check "password check: 36 two-byte letters (72 bytes) are accepted" pw_accepted "$PW72"
+check "password check: 37 letters of 73 bytes are refused (bytes count, not letters)" pw_refused "$PW73" "is 73 bytes long"
+check "password check: 24 three-byte letters (72 bytes) are accepted" pw_accepted "$(rep "$B3" 24)"
+check "password check: 25 three-byte letters (75 bytes) are refused" pw_refused "$(rep "$B3" 25)" "is 75 bytes long"
+check "password check: 18 four-byte letters (72 bytes) are accepted" pw_accepted "$(rep "$B4" 18)"
+check "password check: 18 four-byte letters and 'a' (73 bytes) are refused" pw_refused "$(rep "$B4" 18)a" "is 73 bytes long"
+
+# refused_saying TEXT: the last run failed and its stderr says TEXT.
+refused_saying() { ((RC != 0)) && grep -qF -- "$1" "$ERR"; }
+# qbit_hash_is PASSWORD: every PBKDF2 hash in qBittorrent.conf ([Preferences]
+# or [WebUI]) is PASSWORD's (its bytes, whatever the locale).
+qbit_hash_is() {
+  python3 - "$QCONF" "$1" <<'PY'
+import base64, hashlib, os, re, sys
+found = re.findall(r'Password_PBKDF2="@ByteArray\(([^:]+):([^)]+)\)"', open(sys.argv[1]).read())
+pw = os.fsencode(sys.argv[2])
+sys.exit(0 if found and all(hashlib.pbkdf2_hmac("sha512", pw, base64.b64decode(s), 100000)
+                            == base64.b64decode(h) for s, h in found) else 1)
+PY
+}
+app_pw_is() { # PYTHON-EXPR: both copies of the password in the app's YAML equal it
+  qtrue "(lambda s: s['gluetun']['environment']['QBITTORRENT_PASSWORD'] == s['filebrowser']['environment']['FILEBROWSER_ADMIN_PASSWORD'] == $1)(st['apps']['torrent-stack']['config']['services'])"
+}
+yaml_pw_set() { # PYTHON-EXPR: edit the password in the app's YAML, as in the web UI
+  state_set "st['apps']['torrent-stack']['config']['services']['gluetun']['environment']['QBITTORRENT_PASSWORD'] = $1"
+}
+install_refused() { # DESCRIPTION PASSWORD TEXT
+  printf '%s' "$2" >"$SECRET_DIR/s.pw"
+  chmod 600 "$SECRET_DIR/s.pw"
+  clear_calls
+  TS_QBITTORRENT_PASSWORD_FILE="$SECRET_DIR/s.pw" run
+  check "unattended install: $1 refused" refused_saying "$3"
+  check "  ... before any dataset, permission or app call" qtrue "mutating == []"
+}
+new_state
+install_refused "'admin' is" admin "QBITTORRENT_PASSWORD cannot be 'admin'"
+install_refused "5 characters are" abcde "QBITTORRENT_PASSWORD must be at least 6 characters"
+install_refused "37 letters of 73 bytes are" "$PW73" "QBITTORRENT_PASSWORD is 73 bytes long; at most 72 work"
+install_refused "25 three-byte letters (75 bytes) are" "$(rep "$B3" 25)" "QBITTORRENT_PASSWORD is 75 bytes long"
+printf '%s' "$PW72" >"$SECRET_DIR/s.pw"
+TS_QBITTORRENT_PASSWORD_FILE="$SECRET_DIR/s.pw" run
+if ((RC == 0)); then ok "unattended install: 36 two-byte letters (72 bytes) are accepted"; else bad "unattended install: 72 bytes accepted (rc=$RC)"; show_logs; fi
+check "  ... and are both copies of the password in the app's YAML, exactly" app_pw_is "'\u00e9' * 36"
+check "  ... and qBittorrent's seeded hash" qbit_hash_is "$PW72"
+check "  ... and are on no midclt command line" secret_not_in_argv "$PW72"
+
+yaml_pw_set "'\u00e9' * 36 + 'a'"
+clear_calls
+run --update
+check "--update: 73 bytes edited into the app's YAML are refused" refused_saying "QBITTORRENT_PASSWORD is 73 bytes long"
+check "  ... before anything is stopped or changed" qtrue "mutating == []"
+yaml_pw_set "'admin'"
+clear_calls
+run --update
+check "--update: 'admin' edited into the app's YAML is refused" refused_saying "QBITTORRENT_PASSWORD cannot be 'admin'"
+check "  ... before anything is stopped or changed" qtrue "mutating == []"
+run --print-yaml
+check "--print-yaml: refused the same way" refused_saying "QBITTORRENT_PASSWORD cannot be 'admin'"
+check "  ... and prints no YAML" bash -c "! grep -q 'services:' '$OUT'"
+printf '%s' 'fixed-Pass-1' >"$SECRET_DIR/s.pw"
+clear_calls
+TS_QBITTORRENT_PASSWORD_FILE="$SECRET_DIR/s.pw" run
+if ((RC == 0)); then ok "a password from TS_QBITTORRENT_PASSWORD_FILE replaces the refused one"; else bad "a password from TS_QBITTORRENT_PASSWORD_FILE replaces the refused one (rc=$RC)"; show_logs; fi
+check "  ... in both places in the YAML" app_pw_is "'fixed-Pass-1'"
+check "  ... and in qBittorrent's hash (re-seeded)" qbit_hash_is fixed-Pass-1
+
+# The wizard asks again until the password works.
+new_state
+# Answers: continue, app name, pool, parent and downloads datasets, PUID,
+# PGID, VPN now (n), ports (n), qBit user, four passwords, webhook, confirm.
+printf '%s\n' "" "" "" "" "" "" "" n n qbadmin admin "$PW73" abcde 'wiz-Pass-1' "" y >"$WORK/answers-pw.txt"
+RC=0
+TS_INTERACTIVE=1 TS_UI=plain bash "$INSTALLER" >"$OUT" 2>"$ERR" <"$WORK/answers-pw.txt" || RC=$?
+if ((RC == 0)); then ok "wizard (plain prompts): installer exits 0"; else bad "wizard (plain prompts): installer exits 0 (rc=$RC)"; show_logs; fi
+check "  ... 'admin' is refused, and the password asked again" grep -qF "The password cannot be 'admin'" "$ERR"
+check "  ... 37 letters of 73 bytes are refused, and asked again" grep -qF "The password is 73 bytes long" "$ERR"
+check "  ... 5 characters are refused, and asked again" grep -qF "The password must be at least 6 characters" "$ERR"
+check "  ... the fourth answer is the app's password" app_pw_is "'wiz-Pass-1'"
+check "  ... no typed password is printed" bash -c "! grep -qF -e 'wiz-Pass-1' -e '$PW73' '$OUT' '$ERR'"
+new_state
+RC=0
+WT_VPN_SETTINGS_1=no WT_QBITTORRENT_PASSWORD_1="$PW73" WT_QBITTORRENT_PASSWORD_2=admin \
+  WT_QBITTORRENT_PASSWORD_3="$PW72" WT_READY=yes \
+  TS_INTERACTIVE=1 TS_UI=whiptail bash "$INSTALLER" >"$OUT" 2>"$ERR" </dev/null || RC=$?
+if ((RC == 0)); then ok "wizard (whiptail): installer exits 0"; else bad "wizard (whiptail): installer exits 0 (rc=$RC)"; show_logs; fi
+wt_count() { grep -c "^$1"$'\t'"$2"$'\t' "$TN_SHIM_STATE/whiptail.log"; } # BOX TITLE
+check "  ... two 'Password not accepted' notes" test "$(wt_count msgbox 'Password not accepted')" == 2
+check "  ... three password boxes" test "$(wt_count passwordbox 'qBittorrent password')" == 3
+check "  ... the third answer (72 bytes) is the app's password" app_pw_is "'\u00e9' * 36"
+check "every call matches the 25.10 API docs" no_schema_errors
 check "work folders in /dev/shm removed after all runs" shm_clean
 
 echo

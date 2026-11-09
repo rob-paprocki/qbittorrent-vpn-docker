@@ -388,6 +388,78 @@ PY
   inst ports-back TS_JACKETT_PORT=9117 TS_FLARESOLVERR_PORT=8191 TS_FILEBROWSER_PORT=8081 -- --unattended
   check "ports: back to the defaults" test "$(published)" == "8090:8090 8191:8191 9117:9117 "
 
+  echo "== the qBittorrent password is also FileBrowser's admin password: not 'admin', 8 characters, 72 bytes"
+  # Letters of 2 and 3 bytes in UTF-8 (e-acute, the euro sign), written as
+  # bytes so that this file stays ASCII. These runs use a UTF-8 locale, in
+  # which bash's ${#var} counts letters: a letter count instead of a byte
+  # count would let the 37-letter, 73-byte password through.
+  repeat_str() { # STRING N
+    local s="" i
+    for ((i = 0; i < $2; i++)); do s+=$1; done
+    printf '%s' "$s"
+  }
+  local B2=$'\xc3\xa9' B3=$'\xe2\x82\xac' PW72 PW73 PW75 ENV_SAVED=/root/env.pw-saved act
+  PW72=$(repeat_str "$B2" 36)
+  PW73="${PW72}a"
+  PW75=$(repeat_str "$B3" 25)
+  check "setup: in C.UTF-8, bash counts the 72-byte password as 36 letters" \
+    test "$(LC_ALL=C.UTF-8 bash -c 'printf %s "${#1}"' _ "$PW72")" == 36
+  cp -p "$STACK_DIR/.env" "$ENV_SAVED"
+  refused_saying() { test "$RC" -ne 0 && has "$LOGS/$1.log" "$2"; } # LOG TEXT
+  nothing_restarted_since() { ! calls_since "$1" | grep -qE ' (stop|up|pull)( |$)'; } # N0
+  env_kept_since() { cmp -s "$ENV_SAVED" "$STACK_DIR/.env" && nothing_restarted_since "$1"; } # N0
+  # The wizard's check, with the password from TS_QBITTORRENT_PASSWORD_FILE
+  # as an answer would give it.
+  wizard_refuses() { # DESCRIPTION PASSWORD TEXT
+    (umask 077 && printf '%s\n' "$2" >/root/secrets/qpw-rule)
+    n0=$(ncalls)
+    inst pw-wizard LC_ALL=C.UTF-8 TS_QBITTORRENT_PASSWORD_FILE=/root/secrets/qpw-rule -- --unattended
+    check "wizard: $1: refused" refused_saying pw-wizard "The qBittorrent password $3"
+    check "wizard: $1: .env unchanged, nothing stopped, pulled or started" env_kept_since "$n0"
+  }
+  wizard_refuses "'admin' (FileBrowser ignores it)" admin "cannot be 'admin'"
+  wizard_refuses "7 characters" abcdefg "must be at least 8 characters"
+  wizard_refuses "37 letters of 73 bytes" "$PW73" "is 73 bytes long; at most 72 work"
+  wizard_refuses "25 three-byte letters (75 bytes)" "$PW75" "is 75 bytes long"
+  (umask 077 && printf '%s\n' abcdefgh >/root/secrets/qpw-rule)
+  inst pw-wizard8 LC_ALL=C.UTF-8 TS_QBITTORRENT_PASSWORD_FILE=/root/secrets/qpw-rule -- --unattended --dry-run
+  check "wizard: 8 characters: accepted (dry run)" test "$RC" -eq 0
+  (umask 077 && printf '%s\n' "$PW72" >/root/secrets/qpw-rule)
+  inst pw-wizard72 LC_ALL=C.UTF-8 TS_QBITTORRENT_PASSWORD_FILE=/root/secrets/qpw-rule -- --unattended --dry-run
+  check "wizard: 36 two-byte letters (72 bytes): accepted (dry run)" test "$RC" -eq 0
+  check "wizard: the dry runs left .env alone" cmp -s "$ENV_SAVED" "$STACK_DIR/.env"
+  # --apply and --update check a hand-edited .env the same way, before they
+  # stop, pull, copy or start anything.
+  env_pw() { sed -i "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD=$1/" "$STACK_DIR/.env"; }
+  env_refused() { # OPTION DESCRIPTION PASSWORD TEXT
+    env_pw "$3"
+    n0=$(ncalls)
+    inst "pw$1" LC_ALL=C.UTF-8 -- "$1"
+    check "$1: $2 in .env: refused" refused_saying "pw$1" "$4"
+    check "$1: $2 in .env: says to run $1 again" has "$LOGS/pw$1.log" "then run $1 again."
+    check "$1: $2 in .env: nothing stopped, pulled or started" nothing_restarted_since "$n0"
+    if [[ "$1" == --update ]]; then
+      check "$1: $2 in .env: no repository files copied" hasnt "$LOGS/pw$1.log" "Copying "
+    fi
+  }
+  for act in --apply --update; do
+    env_refused "$act" "'admin'" admin "QBITTORRENT_PASSWORD in $STACK_DIR/.env cannot be 'admin'"
+    env_refused "$act" "7 characters" abcdefg "QBITTORRENT_PASSWORD in $STACK_DIR/.env must be at least 8 characters"
+    env_refused "$act" "37 letters of 73 bytes" "$PW73" "QBITTORRENT_PASSWORD in $STACK_DIR/.env is 73 bytes long"
+    env_refused "$act" "the .env.example placeholder" your_qbit_password "QBITTORRENT_USER/QBITTORRENT_PASSWORD in $STACK_DIR/.env are still placeholders"
+  done
+  env_pw "$PW72"
+  inst pw-apply72 LC_ALL=C.UTF-8 -- --apply
+  check "--apply: 36 two-byte letters (72 bytes) in .env: accepted" test "$RC" -eq 0
+  check "--apply: compose reads the 72 bytes back exactly, for Gluetun" test "$(envv QBITTORRENT_PASSWORD)" == "$PW72"
+  check "--apply: ... and as FileBrowser's admin password" test "$(envv FILEBROWSER_ADMIN_PASSWORD filebrowser)" == "$PW72"
+  check "--apply: qBittorrent's hash is the 72-byte password's" pbkdf2_ok "$PW72"
+  check "--apply: the password is on no docker command line" hasnt "$FD/calls.log" "$PW72"
+  cp -p "$ENV_SAVED" "$STACK_DIR/.env"
+  inst pw-back -- --apply
+  check "password back to the one before: exit 0" test "$RC" -eq 0
+  check "password back to the one before: seeded" pbkdf2_ok 'An0ther "pw" here'
+
   echo "== FileBrowser's folder and the downloads"
   # What FileBrowser leaves there: its database, owned by its own uid 1000,
   # group 100 (the folder is setgid), mode 644.
@@ -865,9 +937,13 @@ COMPOSE_HOST=/usr/libexec/docker/cli-plugins/docker-compose
 [[ -x "$COMPOSE_HOST" ]] || COMPOSE_HOST="$COMPOSE_DSM"
 
 # The repository as it would be checked out: tracked and new files, without
-# anything git ignores (.env, runtime configs, venvs).
+# anything git ignores (.env, runtime configs, venvs). A tracked file deleted
+# in the working tree but not yet in the index is still listed: left out.
 SRC_TAR="$CACHE/src.tar"
-git -C "$REPO" ls-files -co --exclude-standard -z | tar -C "$REPO" --null -T - -cf "$SRC_TAR"
+git -C "$REPO" ls-files -co --exclude-standard -z |
+  while IFS= read -r -d '' f; do
+    if [[ -e "$REPO/$f" || -L "$REPO/$f" ]]; then printf '%s\0' "$f"; fi
+  done | tar -C "$REPO" --null -T - -cf "$SRC_TAR"
 
 # TS_TEST_KEEP=1 keeps the container for a look inside (delete it after).
 cleanup() {
@@ -1060,6 +1136,27 @@ PY
     chmod 775 "$DL"
     check "real FileBrowser: with group write it can upload into the downloads" docker exec "$FBC" touch /srv/downloads/fb-test
     check "install.sh's FileBrowser write check (real docker) then passes" test -z "$(write_test 1000:1000 100 "$D/configs/filebrowser" "$DL")"
+    # The passwords install.sh refuses, on the real image: FileBrowser keeps
+    # the old password (and logs why) for 73 bytes, for fewer than 5, and for
+    # 'admin'. 36 two-byte letters (72 bytes) work. (bcrypt compares only the
+    # first 72 bytes at login, so the 73-byte one starts differently.)
+    fb_pw() { # PASSWORD: make it QBITTORRENT_PASSWORD and recreate FileBrowser
+      sed -i "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD=$1/" "$D/fb.env"
+      "${FBP[@]}" up -d filebrowser >"$WORK/fb-up.log" 2>&1 || cat "$WORK/fb-up.log"
+      fb_wait || true
+    }
+    FB72=$(printf "\xc3\xa9%.0s" $(seq 36))
+    fb_pw "$FB72"
+    check "real FileBrowser: 36 two-byte letters (72 bytes) are its admin password" test "$(fb_code admin "$FB72")" == 200
+    fb_pw "b${FB72}"
+    check "real FileBrowser: 73 bytes: it cannot set them (bcrypt)" bash -c "docker logs $FBC 2>&1 | grep -q 'password length exceeds 72 bytes'"
+    check "real FileBrowser: 73 bytes: the 73 bytes do not log in" test "$(fb_code admin "b${FB72}")" == 401
+    check "real FileBrowser: 73 bytes: the old password still does" test "$(fb_code admin "$FB72")" == 200
+    fb_pw abcd
+    check "real FileBrowser: 4 characters: refused (at least 5)" bash -c "docker logs $FBC 2>&1 | grep -q 'password must be at least 5 characters'"
+    check "real FileBrowser: 4 characters: the old password still logs in" test "$(fb_code admin "$FB72")" == 200
+    fb_pw admin
+    check "real FileBrowser: 'admin': not used, the old password still logs in" bash -c "[[ \$1 == 401 && \$2 == 200 ]]" _ "$(fb_code admin admin)" "$(fb_code admin "$FB72")"
     "${FBP[@]}" down >/dev/null 2>&1 || docker rm -f "$FBC" >/dev/null 2>&1 || true
   else
     echo "  skip real FileBrowser checks (${FB_IMAGE:-no image in compose.yaml} could not be pulled)"

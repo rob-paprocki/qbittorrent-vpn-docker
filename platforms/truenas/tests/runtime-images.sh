@@ -79,12 +79,12 @@ else
     sed -e 's|^QBITTORRENT_USER=.*|QBITTORRENT_USER=admin|' \
       -e "s|^QBITTORRENT_PASSWORD=.*|QBITTORRENT_PASSWORD=$1|" "$REPO/.env.example" >"$Q/seed/seed.env"
     chown 568:568 "$Q/seed/seed.env"
-    as568 python3 -I "$H" qbit-defaults --repo "$REPO" --conf "$CONF" >/dev/null
-    as568 python3 -I "$H" fetch-plugin --repo "$REPO" --dest "$Q/config/qbittorrent/qBittorrent/nova3/engines/jackett.py" >/dev/null
-    as568 python3 -I "$REPO/scripts/env-editor/seed_configs.py" --env "$Q/seed/seed.env" \
+    as568 python3 -I -B "$H" qbit-defaults --repo "$REPO" --conf "$CONF" >/dev/null
+    as568 python3 -I -B "$H" fetch-plugin --repo "$REPO" --dest "$Q/config/qbittorrent/qBittorrent/nova3/engines/jackett.py" >/dev/null
+    as568 python3 -I -B "$REPO/scripts/env-editor/seed_configs.py" --env "$Q/seed/seed.env" \
       --config-root "$Q/config" --only jackett,qbit --jackett-port 9117 >/dev/null
     if [[ "${2:-}" != --no-fix ]]; then
-      as568 python3 -I "$H" qbit-webui-fix --repo "$REPO" --conf "$CONF" >/dev/null
+      as568 python3 -I -B "$H" qbit-webui-fix --repo "$REPO" --conf "$CONF" >/dev/null
     fi
     chown -R 568:568 "$Q/config"
   }
@@ -159,8 +159,8 @@ else
   printf '%s\0' "CONFIG_PATH=$F/mnt/configs" "DOWNLOADS_PATH=$F/mnt/downloads" \
     "INCOMPLETE_DOWNLOADS=$F/mnt/downloads/incomplete" QBITTORRENT_USER=admin \
     "QBITTORRENT_PASSWORD=$PW" PUID=568 PGID=568 TZ=UTC >"$F/layer"
-  python3 -I "$H" merge --repo "$REPO" --layer "$F/layer" --out "$F/values.json" --need-paths
-  python3 -I "$H" render --repo "$REPO" --values "$F/values.json" --app-name tnrt \
+  python3 -I -B "$H" merge --repo "$REPO" --layer "$F/layer" --out "$F/values.json" --need-paths
+  python3 -I -B "$H" render --repo "$REPO" --values "$F/values.json" --app-name tnrt \
     --source-dir "$F/mnt/source" --allowed-root "$F/mnt" --out-yaml "$F/rendered.yaml"
   # Only the filebrowser service, without network and published port.
   python3 - "$F/rendered.yaml" "$F/compose.yaml" <<'PY'

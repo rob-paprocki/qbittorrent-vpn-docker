@@ -2,7 +2,8 @@
 #
 # platforms/casaos/install.sh
 #
-# Purpose: run as root on a CasaOS or ZimaOS host (its terminal, or SSH).
+# Purpose: run as root on a CasaOS or ZimaOS host (its terminal, or SSH);
+# only --print-yaml also runs without root.
 # Installs this repository's Docker Compose stack (Gluetun, qBittorrent,
 # Jackett, FlareSolverr, FileBrowser) as ONE CasaOS app, so it shows on the
 # dashboard and is started, stopped and uninstalled there like any other app:
@@ -13,9 +14,8 @@
 #     paths, every value written out in full (CasaOS does not read .env
 #     files), and the x-casaos metadata the dashboard needs;
 #   * qBittorrent and Jackett are seeded with the repository's seeding CLI
-#     (the host's python3 when it has one, otherwise a throwaway python
-#     container; ZimaOS ships no python3, as far as we know), as the apps'
-#     user, never as root;
+#     (the host's python3 when it has 3.8 or later, otherwise a throwaway
+#     python container), as the apps' user, never as root;
 #   * the app is installed (or updated) through CasaOS's app-management
 #     API: the same call the dashboard's "Install a customized app > Import"
 #     and `casaos-cli app-management install` make;
@@ -213,7 +213,9 @@ Usage (as root):
                              container images, and apply with the new script.
   install.sh --print-yaml    Print the CasaOS app YAML for the current .env
                              to stdout, for the dashboard's manual Import.
-                             It contains your VPN key and passwords.
+                             It contains your VPN key and passwords. Needs
+                             no root, only read access to .env (which on
+                             an installed stack only root has).
   install.sh --uninstall     Remove the app from CasaOS. Keeps
                              ${DEFAULT_APPDATA}/${STACK} (configs, .env) and
                              your downloads.
@@ -327,8 +329,8 @@ if [[ "$INTERACTIVE" == 0 && "$UNATTENDED" != 1 && "$ACTION" == install && "$DRY
 fi
 
 # ---------------------------------------------------------------------------
-# Questions: whiptail (CasaOS on Debian/Ubuntu has it), dialog, or plain
-# prompts (ZimaOS seems to have neither). Same helpers as platforms/truenas/install.sh.
+# Questions: whiptail (CasaOS on Debian/Ubuntu has it, ZimaOS 1.8.0 too),
+# dialog, or plain prompts. Same helpers as platforms/truenas/install.sh.
 # Answers are stored in the variable named by the first argument.
 # ---------------------------------------------------------------------------
 UI=plain
@@ -956,33 +958,86 @@ check_downloads_path() {
 # Getting the repository
 # ---------------------------------------------------------------------------
 
-# Copy SRC into DEST without git metadata, secrets or runtime state.
+# copy_tree SRC DEST: copy the repository files in SRC into DEST without git
+# metadata, secrets or runtime state. It lays them over what DEST has, so
+# .env, configs/ and anything else SRC lacks stay as they are.
+#
+# This needs no tar: only bash's own globbing, mkdir, rm and cp -P, which
+# GNU coreutils and busybox both have. CasaOS hosts (Debian, Ubuntu,
+# Raspberry Pi OS) always have GNU tar and coreutils, and ZimaOS 1.8.0 has
+# GNU tar 1.35 and GNU coreutils too, but a busybox tar may be built without
+# --exclude (Ubuntu's busybox-static 1.36.1 is), and cpio is in neither
+# ZimaOS 1.8.0 nor a minimal Debian. The result is the same with every
+# tool set: the copies belong to root and keep their source's mode without
+# group and other write (umask 022, whatever the caller's), new folders get
+# 0755, symlinks are copied as symlinks, and anything else (a FIFO, a
+# socket) is left out. What is in the way in DEST is removed first, as tar
+# does, so a symlink there is replaced, never written through.
 copy_tree() {
-  local src=$1 dest=$2 f ex=()
-  for f in "$src"/.env.*; do
-    [[ -e "$f" && "${f##*/}" != .env.example ]] && ex+=("--exclude=./${f##*/}")
-  done
+  local src=$1 dest=$2 mask
+  mask=$(umask)
+  umask 022
   run mkdir -p "$dest"
   if [[ "$DRY_RUN" == 1 ]]; then
     msg_dry "would copy ${src} to ${dest} (without .git, .env, configs/, downloads/)"
-    return 0
+  else
+    copy_dir "$src" "$dest" ""
   fi
-  # Only options GNU tar and busybox tar both understand (ZimaOS may have
-  # busybox's): plain --exclude patterns ("./x" only matches at the top,
-  # "__pycache__" anywhere) and -o (do not restore the archive's owners).
-  tar -C "$src" --exclude=__pycache__ --exclude='*.pyc' \
-    --exclude=./.git --exclude=./.env --exclude=./configs \
-    --exclude=./downloads --exclude=./incomplete --exclude=./scripts/env-editor/.venv \
-    --exclude=./.casaos-state --exclude=./casaos-app.yml \
-    ${ex[@]+"${ex[@]}"} -cf - . | tar -C "$dest" -x -o -f -
+  umask "$mask"
+}
+
+# copy_skip REL: is REL (a path relative to the top of the source) one that
+# copy_tree leaves out? __pycache__ and *.pyc anywhere, the rest at the top.
+copy_skip() {
+  case "${1##*/}" in __pycache__ | *.pyc) return 0 ;; esac
+  case "$1" in
+    .env.example) return 1 ;;
+    .git | .env | .env.* | configs | downloads | incomplete | .casaos-state | casaos-app.yml) return 0 ;;
+    scripts/env-editor/.venv) return 0 ;;
+  esac
+  return 1
+}
+
+# copy_dir SRC DEST REL: copy the folder SRC/REL into DEST/REL (a real
+# folder), then its subfolders; one rm and one cp per folder.
+copy_dir() {
+  local src=$1 dest=$2 rel=$3 p r d
+  local from="${src}${rel:+/$rel}" to="${dest}${rel:+/$rel}"
+  local files=() old=() dirs=()
+  for p in "$from"/* "$from"/.[!.]* "$from"/..?*; do
+    [[ -e "$p" || -L "$p" ]] || continue # a pattern that matched nothing
+    r="${rel:+$rel/}${p##*/}"
+    copy_skip "$r" && continue
+    d="${dest}/${r}"
+    if [[ -d "$p" && ! -L "$p" ]]; then
+      if [[ -L "$d" || (-e "$d" && ! -d "$d") ]]; then rm -f -- "$d"; fi
+      [[ -d "$d" ]] || mkdir -- "$d"
+      dirs+=("$r")
+    elif [[ -L "$p" || -f "$p" ]]; then
+      if [[ -d "$d" && ! -L "$d" ]]; then
+        die "Cannot copy ${p}: ${d} is a folder. Move it out of the way, then run this again."
+      fi
+      if [[ -e "$d" || -L "$d" ]]; then old+=("$d"); fi
+      files+=("$p")
+    fi
+  done
+  ((${#old[@]} == 0)) || rm -f -- "${old[@]}"
+  ((${#files[@]} == 0)) || cp -P -- "${files[@]}" "${to}/"
+  for r in ${dirs[@]+"${dirs[@]}"}; do
+    copy_dir "$src" "$dest" "$r"
+  done
 }
 
 SRC_COMMIT=""
 # Download the repository into TEMP_DIR/src: git when the host has it
-# (CasaOS on Debian/Ubuntu usually does), otherwise a tarball with curl
-# (ZimaOS does not seem to ship git).
+# (ZimaOS 1.8.0 does; CasaOS's installer does not add it to Debian or
+# Ubuntu), otherwise a tarball with curl and tar (every CasaOS host has tar:
+# CasaOS's own installer unpacks its packages with it).
 download_source() {
   local dest="$TEMP_DIR/src"
+  if ! command -v git >/dev/null 2>&1 && ! command -v tar >/dev/null 2>&1; then
+    die "Neither git nor tar is installed, so the repository cannot be downloaded. Install one of them, or copy a checkout of the repository to this machine and run this again with TS_SOURCE_DIR=/path/to/it."
+  fi
   if command -v git >/dev/null 2>&1; then
     msg_info "Cloning ${REPO_URL} (${TS_REF})"
     git clone -q --depth 1 --branch "$TS_REF" "${REPO_URL}.git" "$dest" ||
@@ -1024,9 +1079,12 @@ prepare_source() {
 
 # install_source: put the repository files into STACK_DIR. Always an overlay
 # copy, never `git pull`: the apps rewrite two git-tracked seed files under
-# configs/, which would make a pull refuse to run.
+# configs/, which would make a pull refuse to run. A TS_SOURCE_DIR that is
+# the stack folder under another name (`.`, a symlink, a trailing //) is
+# the same folder: copy_tree removes each file before it copies, so copying
+# a folder onto itself would delete the repository files.
 install_source() {
-  [[ "$SRC_DIR" == "$STACK_DIR" ]] && return 0
+  [[ "$SRC_DIR" == "$STACK_DIR" || "$SRC_DIR" -ef "$STACK_DIR" ]] && return 0
   msg_info "Copying the repository files to ${STACK_DIR}"
   copy_tree "$SRC_DIR" "$STACK_DIR"
   state_set source "${TS_SOURCE_DIR:-${REPO_URL}@${TS_REF}}${SRC_COMMIT:+ (${SRC_COMMIT})}"
@@ -1331,16 +1389,17 @@ check_inline_values() {
 # "admin" user the qBittorrent password (FILEBROWSER_ADMIN_PASSWORD), set
 # again on every start. FileBrowser Quantum 2.0 ignores the value "admin"
 # (a new database then gets a random password, an existing one keeps its
-# old one), refuses fewer than 5 characters
-# when it sets the password on a later start, and its bcrypt hash cannot
-# take more than 72 bytes. Prints why PASSWORD would not work, or nothing.
+# old one), refuses fewer than 5 bytes when it sets the password on a
+# later start, and its bcrypt hash cannot take more than 72 bytes. Both
+# limits count bytes (wc -c, in any locale), as FileBrowser does. Prints
+# why PASSWORD would not work, or nothing.
 filebrowser_password_problem() {
   local n
   n=$(printf '%s' "$1" | wc -c)
   if [[ "$1" == admin ]]; then
     echo "FileBrowser ignores the password 'admin' (it would make up its own, or keep the old one)"
   elif ((n < 5)); then
-    echo "FileBrowser needs at least 5 characters"
+    echo "FileBrowser needs at least 5 bytes (letters outside A-Z take 2 to 4 bytes each)"
   elif ((n > 72)); then
     echo "FileBrowser takes at most 72 bytes (letters outside A-Z can take 2-4 bytes each)"
   fi
@@ -1986,9 +2045,9 @@ seed_configs() {
   fi
   stop_for_seeding
   # The host's python3 (3.8 or later) needs nothing extra: these seeders
-  # only use Python's standard library. ZimaOS seems to ship no python3, so
-  # the fallback is a throwaway container with the stack folder read-only
-  # and only the configs writable. -I: never import from the current folder.
+  # only use Python's standard library. Without one, the fallback is a
+  # throwaway container with the stack folder read-only and only the
+  # configs writable. -I: never import from the current folder.
   if command -v python3 >/dev/null 2>&1 &&
     python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 8))' >/dev/null 2>&1; then
     msg_info "Seeding the qBittorrent and Jackett configs (host python3)"
@@ -2517,10 +2576,15 @@ do_update() {
   deploy
 }
 
+# do_print_yaml: the one action that does not need root. It only reads
+# .env, compose.yaml and update-qbittorrent.sh, and writes nothing but its
+# own temporary folder (removed on exit) and stdout. So any user who may
+# read .env can run it: on an installed stack that is root only (.env is
+# 0600), in CI the runner's user.
 do_print_yaml() {
-  check_root
   set_stack_dir "$(pick_appdata)"
   [[ -f "$ENV_FILE" ]] || die "There is no ${ENV_FILE} yet. Run: install.sh --no-register   first (it prepares the folders and .env)."
+  [[ -r "$ENV_FILE" ]] || die "Cannot read ${ENV_FILE} as $(id -un 2>/dev/null || id -u). It holds the VPN key, so on an installed stack only root may read it: run this as root (on CasaOS: sudo -i first)."
   SRC_DIR="$STACK_DIR"
   [[ -n "$TS_SOURCE_DIR" ]] && SRC_DIR="${TS_SOURCE_DIR%/}"
   [[ -f "${SRC_DIR}/compose.yaml" ]] || die "${SRC_DIR}/compose.yaml is missing."
@@ -2574,7 +2638,8 @@ do_uninstall() {
 }
 
 main() {
-  # --print-yaml keeps stdout for the YAML and talks to nobody.
+  # --print-yaml keeps stdout for the YAML and talks to nobody. It also
+  # skips preflight, and with it the root check every other action has.
   if [[ "$ACTION" == print-yaml ]]; then
     TEMP_DIR=$(mktemp -d)
     do_print_yaml

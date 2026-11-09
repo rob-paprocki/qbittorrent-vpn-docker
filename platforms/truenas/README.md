@@ -50,7 +50,7 @@ If `whiptail` or `dialog` is installed, the installer uses it for the questions.
 | VPN settings now? | yes | Provider, WireGuard or OpenVPN, the key or username/password, exit countries. You can say no and add them later. |
 | Change ports? | no | The four web UI ports. |
 | qBittorrent username | `admin` | FileBrowser's admin user is always `admin`, with the same password (see [First login](#first-login)). |
-| qBittorrent password | generated | Leave it empty to get a random 24-character password, shown at the end. |
+| qBittorrent password | generated | Leave it empty to get a random 24-character password, shown at the end. A password you type needs 6 characters or more and at most 72 bytes, and cannot be `admin`, because it is also FileBrowser's admin password (see [Password limits](#password-limits)). The wizard asks again until it can be used. |
 | Discord webhook | none | For the port-forward notifications of `update-qbittorrent.sh`. |
 | Time zone | TrueNAS's | Not asked; taken from **System > General**. Set `TS_TZ` to override. |
 
@@ -78,7 +78,7 @@ If `whiptail` or `dialog` is installed, the installer uses it for the questions.
 | Folder | Owner | Mode | Why |
 |---|---|---|---|
 | `configs/gluetun`, `qbittorrent`, `jackett`, `flaresolverr` | PUID:PGID | as created (755) | The user each app runs as. |
-| `configs/filebrowser` | 1000:PGID | 2770 | FileBrowser's database. Writable for user 1000 and group PGID. The `2` (setgid) makes new files there belong to PGID. Closed to everyone else: the database holds FileBrowser's password hashes and the key that signs its logins. A re-run fixes this folder if an older version of the installer made it 755. |
+| `configs/filebrowser` | 1000:PGID | 2770 | FileBrowser's database. Writable for user 1000 and group PGID. The `2` (setgid) makes new files there belong to PGID. Closed to everyone else: the database holds FileBrowser's password hashes and the key that signs its logins. Every run sets this folder back to 1000:PGID and 2770. |
 | the downloads dataset, if the installer creates it | PUID:PGID | 2775 | qBittorrent saves there as PUID:PGID. FileBrowser gets in through group PGID. |
 | `incomplete/`, if the installer creates it | PUID:PGID | 2775 | The same. |
 
@@ -118,6 +118,14 @@ Gluetun keeps `/dev/net/tun` and `NET_ADMIN`, and qBittorrent, Jackett and Flare
 
   **What FileBrowser keeps**: everything else. Its database is `configs/filebrowser/database.sqlite` on your configs dataset (`FILEBROWSER_DATABASE_PATH=/config/database.sqlite` in `compose.yaml`). Users you add, shares and settings survive restarts, app updates and TrueNAS recreating the containers.
 
+### Password limits
+
+The qBittorrent password is also FileBrowser's `admin` password, so the installer refuses one that FileBrowser (v2.0.2-stable) cannot use. It checks the wizard's answer (and asks again), `TS_QBITTORRENT_PASSWORD_FILE`, and the password it reads back from the app's YAML on a re-run, `--update` or `--print-yaml`. A refused password stops the installer before it changes anything. The password must be:
+
+* **at most 72 bytes.** FileBrowser stores it as a bcrypt hash, and bcrypt takes no more. With a longer one, FileBrowser does not start on a new database and keeps its old password on an existing one. Bytes, not letters: A-Z, digits and ASCII punctuation take 1 byte each, accented letters 2, the euro sign 3, most emoji 4.
+* **not `admin`.** FileBrowser ignores that value: a new database gets a random password of its own, an existing one keeps its old password.
+* **at least 6 characters**, qBittorrent's own minimum. FileBrowser's is 5 bytes: on a later start it refuses to set a shorter password and keeps its old one.
+
 ## Adding the VPN settings later
 
 **The easy way:** run the installer again (the same one-liner). It finds the app and asks whether to change settings. Answer yes and enter the VPN details. It keeps everything else.
@@ -137,7 +145,7 @@ The installer reads the settings back from the app's current YAML, including cha
 
 Two things to know:
 
-* **Changing the qBittorrent password.** The password is in three places: in the YAML twice (Gluetun's port-forward script uses it, and FileBrowser's admin password is set from it) and in qBittorrent's own config. Change it with the installer: the wizard, or `TS_QBITTORRENT_PASSWORD_FILE=...`. The installer notices the change, stops the app, rewrites qBittorrent's config, updates the YAML and starts the app again. If you change it in the web UI's YAML instead, change the `QBITTORRENT_PASSWORD` line under `gluetun`, then run the installer with `--reseed`, so qBittorrent and FileBrowser get it too. (The installer reads the password from that line. If you only change `FILEBROWSER_ADMIN_PASSWORD`, the next run sets it back to the qBittorrent password.)
+* **Changing the qBittorrent password.** The password is in three places: in the YAML twice (Gluetun's port-forward script uses it, and FileBrowser's admin password is set from it) and in qBittorrent's own config. Change it with the installer: the wizard, or `TS_QBITTORRENT_PASSWORD_FILE=...` (see [Password limits](#password-limits) for what it accepts). The installer notices the change, stops the app, rewrites qBittorrent's config, updates the YAML and starts the app again. If you change it in the web UI's YAML instead, change the `QBITTORRENT_PASSWORD` line under `gluetun`, then run the installer with `--reseed`, so qBittorrent and FileBrowser get it too. A password there that FileBrowser cannot use makes the installer stop with an error until you change it again. (The installer reads the password from that line. If you only change `FILEBROWSER_ADMIN_PASSWORD`, the next run sets it back to the qBittorrent password.)
 * **Changing PUID/PGID** re-owns the config folders. It does not re-own the downloads; the installer tells you the `chown` command to run.
 
 ## Updating
@@ -184,7 +192,7 @@ TS_UNATTENDED=1 TS_POOL=tank TS_VPN_PROVIDER=protonvpn TS_VPN_TYPE=wireguard \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/rob-paprocki/qbittorrent-vpn-docker/main/platforms/truenas/install.sh)"
 ```
 
-The other variables are `TS_APP_NAME`, `TS_POOL`, `TS_DATASET`, `TS_DOWNLOADS_DATASET`, `TS_SOURCE_DIR`, `TS_REF` and `TS_UI`. Run with `--help` for the full list.
+A password in `TS_QBITTORRENT_PASSWORD_FILE` follows the [Password limits](#password-limits). The other variables are `TS_APP_NAME`, `TS_POOL`, `TS_DATASET`, `TS_DOWNLOADS_DATASET`, `TS_SOURCE_DIR`, `TS_REF` and `TS_UI`. Run with `--help` for the full list.
 
 ## Install via YAML by hand
 
@@ -230,7 +238,6 @@ Letting the installer create the app does all of this for you.
 * x86-64 only in practice (TrueNAS itself is x86-64).
 * The env-editor web page from the main README is not used on TrueNAS. TrueNAS appliances shouldn't have extra software installed on the host, and the app's YAML takes its place.
 * FileBrowser's admin user is always `admin`, and its password always follows the qBittorrent password (see [First login](#first-login)).
-* The seeding CLI's FileBrowser step (`settings.yaml` with a bcrypt hash) is not used on TrueNAS. The current FileBrowser image never reads that file.
 * **Files in the downloads are not group-writable.** qBittorrent saves them with its default umask 022 (files `rw-r--r--`, folders `rwxr-xr-x`), and FileBrowser creates its own the same way (its default 644/755). The downloads folder itself is group-writable, so FileBrowser can delete or rename what sits directly in it. With plain permissions it can't change or delete files inside a folder that qBittorrent created. The Apps preset's inherited ACL (group Modify) may give the group that access on TrueNAS. That was not tried on real ZFS.
 * FileBrowser publishes its port on all addresses, as in the main stack. Firewall it or put it behind a reverse proxy if TrueNAS is reachable from untrusted networks.
 
@@ -240,13 +247,14 @@ Tested on a Linux test machine, not on TrueNAS. The test suite is `platforms/tru
 
 It replaces `midclt` and TrueNAS's Python API client with stand-ins that record every call. Each call is checked against the parameters documented for TrueNAS 25.10, including whether it's a job (`-j`); `app.delete` is also checked against 27.0. The stand-ins also run the YAML through `docker compose config`, as TrueNAS's middleware does.
 
-The real installer runs against the real repository, with real seeding, inside a private mount namespace whose `/mnt` is empty. On the last run all 215 checks passed. They cover:
+The real installer runs against the real repository, with real seeding, inside a private mount namespace whose `/mnt` is empty. On the last run all 258 checks passed. They cover:
 
 * a fresh install without VPN settings (gated), including qBittorrent's default paths, the pinned search plugin (sha256), and FileBrowser's database path and password in the YAML;
 * that the app's services are exactly what `docker compose config` makes of `compose.yaml` with the same settings, apart from the differences listed under [What it creates](#what-it-creates). So the installer adds no FileBrowser or port settings of its own;
-* the folder owners and modes in the table above (FileBrowser's folder 2770, downloads and `incomplete/` 2775), checked as user 1000 with and without group PGID; a FileBrowser folder left at 755 by an older installer being fixed; the warning for an existing downloads dataset that FileBrowser can't write to;
+* the folder owners and modes in the table above (FileBrowser's folder 2770, downloads and `incomplete/` 2775), checked as user 1000 with and without group PGID; a FileBrowser folder at 755 set back to 2770 by a re-run; the warning for an existing downloads dataset that FileBrowser can't write to;
 * a `compose.yaml` that keeps FileBrowser's database outside the configs dataset (refused);
 * adding VPN settings later; a re-run with no changes; settings edited in the web UI being kept, and a `FILEBROWSER_ADMIN_PASSWORD` edited on its own going back to the qBittorrent password;
+* the [password limits](#password-limits): `admin`, 5 characters, 73 bytes (37 two-byte letters) and 75 bytes (25 three-byte letters) are refused before any dataset, permission or app call, from `TS_QBITTORRENT_PASSWORD_FILE`, and from the app's YAML (edited in the web UI) on `--update` and `--print-yaml`; the wizard refuses them and asks again, through plain prompts and through `whiptail`. 6 characters and 72 bytes (of 1-, 2-, 3- and 4-byte letters) are accepted, and a 72-byte password arrives exactly in both places in the YAML and in qBittorrent's hash. A good password from `TS_QBITTORRENT_PASSWORD_FILE` replaces a refused one in the YAML;
 * a password change triggering a re-seed after qBittorrent's first start, with the new login landing in `[WebUI]` (checked with a real container too: a password with `$` and `"` arrives exactly as typed);
 * `--dry-run`, `--print-yaml` and `--uninstall`;
 * an existing downloads dataset, OpenVPN, PUID 1000, with the configs dataset closed to uid 1000 (as the Apps preset is) while the seeding still works;
@@ -287,7 +295,7 @@ Not tested:
 * TrueNAS build manifest, release/25.10.8 (git ships): <https://github.com/truenas/scale-build/blob/release/25.10.8/conf/build.manifest>
 * Forum: [25.10 RC1 custom app YAML input bug](https://forums.truenas.com/t/25-10-rc1-custom-app-yaml-input-bug/55300) (the `services` key), [Can't spin up custom docker-compose.yml, no logs in app_lifecycle.log](https://forums.truenas.com/t/cant-spin-up-custom-docker-compose-yml-file-no-logs-in-var-log-app-lifecycle-log/67097) (pre-pulling images)
 * TechnoTim, TrueNAS Docker Pro (the `services: {}` workaround): <https://technotim.com/posts/truenas-docker-pro/>
-* FileBrowser Quantum v2.0.2-stable. The image runs as uid 1000 (group 1000) and sets `FILEBROWSER_DATABASE_PATH` / `FILEBROWSER_CONFIG` to `/home/filebrowser/data`: [_docker/Dockerfile](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/_docker/Dockerfile). `FILEBROWSER_ADMIN_PASSWORD` sets `auth.adminPassword`, the admin user is `admin` by default (no environment variable changes that), and new files and folders get 644/755: [backend/pkg/settings/config.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/config.go) (`loadEnvConfig`, `SetDefaults`). On every start `validateUserInfo` resets the `admin` user's password to it unless it is empty or `admin`: [cmd/root.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/cmd/root.go), [cmd/user.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/cmd/user.go), [auth.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/auth.go) (`ConfigTriggersAdminPasswordReset`). A first password is only generated (and logged) when none is set: [state/bootstrap_admin_password.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/state/bootstrap_admin_password.go). The database path: [database_paths.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/database_paths.go)
+* FileBrowser Quantum v2.0.2-stable. The image runs as uid 1000 (group 1000) and sets `FILEBROWSER_DATABASE_PATH` / `FILEBROWSER_CONFIG` to `/home/filebrowser/data`: [_docker/Dockerfile](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/_docker/Dockerfile). `FILEBROWSER_ADMIN_PASSWORD` sets `auth.adminPassword`, the admin user is `admin` by default (no environment variable changes that), and new files and folders get 644/755: [backend/pkg/settings/config.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/config.go) (`loadEnvConfig`, `SetDefaults`). On every start `validateUserInfo` resets the `admin` user's password to it unless it is empty or `admin`: [cmd/root.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/cmd/root.go), [cmd/user.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/cmd/user.go), [auth.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/auth.go) (`ConfigTriggersAdminPasswordReset`). A first password is only generated (and logged) when none is set: [state/bootstrap_admin_password.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/state/bootstrap_admin_password.go). The password limits: a password that is set or changed must have at least `auth.methods.password.minLength` bytes, default 5 ([pkg/settings/password_policy.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/password_policy.go), `MinLength: 5` in `config.go`), checked in `UpdateUser` ([state/users.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/state/users.go)) but not when the first admin user is made ([state/quick_setup.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/state/quick_setup.go), which stops FileBrowser if hashing fails). Passwords are hashed with bcrypt ([utils/crypto.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/utils/crypto.go)), whose `GenerateFromPassword` refuses more than 72 bytes ([bcrypt.go in golang.org/x/crypto v0.57.0](https://github.com/golang/crypto/blob/v0.57.0/bcrypt/bcrypt.go), the version in [backend/go.mod](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/go.mod)). The database path: [database_paths.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/database_paths.go)
 * TrueNAS's Apps preset: `aclmode=PASSTHROUGH`, the `NFS4_RESTRICTED` ACL (owner@ Full Control, group@ Modify, both inherited) plus user 568 Modify: [pool_/dataset.py](https://github.com/truenas/middleware/blob/release/25.10.8/src/middlewared/middlewared/plugins/pool_/dataset.py), [the NFS4_RESTRICTED template](https://github.com/truenas/middleware/blob/release/25.10.8/src/middlewared/middlewared/alembic/versions/22.02/2021-08-26_14-35_add-acl-templates.py). What `aclmode` means for `chmod` (passthrough allows it; setgid needs it): [OpenZFS zfsprops(7)](https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html)
 * LinuxServer qBittorrent: [init script](https://github.com/linuxserver/docker-qbittorrent/blob/master/root/etc/s6-overlay/s6-rc.d/init-qbittorrent-config/run) (defaults only copied when there is no `qBittorrent.conf`), [defaults/qBittorrent.conf](https://github.com/linuxserver/docker-qbittorrent/blob/master/root/defaults/qBittorrent.conf), [Dockerfile](https://github.com/linuxserver/docker-qbittorrent/blob/master/Dockerfile) (`HOME=/config`)
 * qBittorrent settings migrations (migration 11 moves the web UI login to `[WebUI]`): [src/app/upgrade.cpp at release-5.3.0](https://github.com/qbittorrent/qBittorrent/blob/release-5.3.0/src/app/upgrade.cpp)
