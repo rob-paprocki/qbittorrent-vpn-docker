@@ -80,7 +80,7 @@ Compose Manager's **Edit Stack > ENV** tab still edits that same `.env`.
 * **Web UIs:** qBittorrent `http://<unraid-ip>:8090`, Jackett `:9117`, FileBrowser `:8081` (or the ports in `.env`).
   * qBittorrent: the username and password from `.env` (`QBITTORRENT_USER`, `QBITTORRENT_PASSWORD`).
   * FileBrowser: user **`admin`** (always, whatever `QBITTORRENT_USER` is) with the **qBittorrent password**. `compose.yaml` passes that password to FileBrowser (`FILEBROWSER_ADMIN_PASSWORD`), and FileBrowser sets it on the `admin` user **every time it starts**. So change it in `.env` (*Edit Stack > ENV*, then `--apply`), not in FileBrowser: a password changed in FileBrowser's own settings only lasts until its next start.
-* **What FileBrowser keeps:** its database, `appdata/filebrowser/database.sqlite`, holds its users, settings and shares. It survives container recreates (*Update Stack*, *Compose Up* after a change, `--update`) and is part of your appdata backup. Installs made with an older version of this repository kept FileBrowser's database inside its container, so it was lost on every recreate; after `--update` FileBrowser starts once with a new, empty database (user `admin`, the qBittorrent password) and keeps it from then on.
+* **What FileBrowser keeps:** its database, `appdata/filebrowser/database.sqlite`, holds its users, settings and shares. It survives container recreates (*Update Stack*, *Compose Up* after a change, `--update`) and is part of your appdata backup. (Test installs made from the `feat/multi-platform-installers` branch before commit 0111892 kept FileBrowser's database inside its container. After an update, FileBrowser starts with a new, empty database, user `admin` with the qBittorrent password, and keeps it from then on.)
 * **Change a setting** (VPN keys, ports, password, paths): *Edit Stack > ENV*, save, then in the terminal:
 
   ```bash
@@ -100,7 +100,7 @@ bash /mnt/user/appdata/torrent-stack/platforms/unraid/install.sh --update
 
 This runs `git pull` in the stack folder (or downloads the repository again if it was not a git clone). It then checks `compose.yaml` against your `.env`, sets the folder owners and permissions the new `compose.yaml` needs (see [What it creates](#what-it-creates); an older install's `appdata/filebrowser` was writable for its owner only, and the new FileBrowser container would not start there), and runs Compose Manager's **Update Stack** (pull images, recreate containers). What is in your `.env` and in the `appdata/` files is not changed; only owners and permissions are, as described above.
 
-**Coming from an install made before FileBrowser kept its database in `appdata/filebrowser`:** the `--update` you run is still the *old* installer, which pulls the new `compose.yaml` but does not know about the new folder permissions, so FileBrowser keeps restarting afterwards (its log says `unable to open database file`). Run the new installer once more to fix that:
+**Only for test installs made from the `feat/multi-platform-installers` branch before commit 0111892** (the `main` branch had no Unraid installer before this one, so a normal install is never in this state): the `--update` you run is still the *old* installer, which pulls the new `compose.yaml` but does not know about the new folder permissions, so FileBrowser keeps restarting afterwards (its log says `unable to open database file`). Run the new installer once more to fix that:
 
 ```bash
 bash /mnt/user/appdata/torrent-stack/platforms/unraid/install.sh --apply
@@ -177,6 +177,8 @@ Run the tests yourself (root, on a throwaway Linux machine or container with Doc
 bash platforms/unraid/tests/run-tests.sh
 TS_TEST_DISPOSABLE=1 bash platforms/unraid/tests/integration-real-docker.sh   # writes Unraid paths: disposable machines only
 ```
+
+Behind a TLS-inspecting proxy, the seeding container needs that proxy's CA: set `SHIM_EXTRA_CA=/path/to/ca.pem`, with the file outside `/usr/local` (for example `/root/ca.pem`), because the test hides the real `/usr/local`.
 
 ## References
 

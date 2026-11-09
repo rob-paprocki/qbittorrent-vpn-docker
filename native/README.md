@@ -381,8 +381,8 @@ changes. Each one comes from reading Gluetun's source at the pinned tag.
   `pct enter` or `incus exec`, or add the port in `gluetun.local.env`
   (repeat the full list).
 - **Port forwarding.** `VPN_PORT_FORWARDING_UP_COMMAND` is
-  `/bin/sh /opt/torrent-stack/update-qbittorrent.sh`. It goes through `/bin/sh`
-  because the script is not marked executable in git. The status file is set
+  `/bin/sh /opt/torrent-stack/update-qbittorrent.sh`. It goes through `/bin/sh`,
+  so the script's executable bit does not matter. The status file is set
   explicitly to `/tmp/gluetun/forwarded_port`, the path the script reads.
   Debian 13 deletes files in `/tmp` that were unused for 10 days, and Gluetun
   creates `/tmp/gluetun` only once, at start; so the installer adds
@@ -407,9 +407,11 @@ The rest of the Gluetun environment is the one in `compose.yaml`, key for key.
   real save paths (Docker uses `/downloads`), the web UI port and VueTorrent's
   folder into it. **qBittorrent 5.3 moved its web UI settings** from
   `[Preferences] WebUI\...` to a `[WebUI]` section (settings migration 11).
-  The env-editor's seeder still writes the old keys, so the native renderer
-  moves them across, as qBittorrent's migration does. Otherwise a re-seeded
-  password would be ignored. qBittorrent 5.3 also answers a good login with
+  The seeding CLI writes the login into `[WebUI]` itself once qBittorrent
+  has migrated the file (it always writes the old `[Preferences]` keys too).
+  The native renderer also moves any old `[Preferences] WebUI\...` keys
+  across, as qBittorrent's migration does. qBittorrent 5.3 also answers a
+  good login with
   `204 No Content` instead of `Ok.`; `update-qbittorrent.sh` accepts both.
 - **VueTorrent**: the release zip, used as qBittorrent's alternative web UI
   (the compose stack uses the VueTorrent docker-mod for the same thing).

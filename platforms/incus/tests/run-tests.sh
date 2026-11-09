@@ -21,7 +21,11 @@
 # and remove all of it afterwards. Only run that on a test machine.
 #
 # Host proxy-device ports are offset by 20000 (TS_TEST_PORT_OFFSET) so the
-# tests do not collide with services on the usual ports.
+# tests do not collide with services on the usual ports. The tests publish
+# the web UI ports (8090 8081 8191 9117 9191) plus OFFSET and plus
+# OFFSET+1000, and qBittorrent on 8097 and 8099. The runner checks first
+# that nothing else listens on those host ports and stops if one is taken;
+# then pick another offset, e.g. TS_TEST_PORT_OFFSET=40000.
 #
 # Copyright (c) 2025-2026 Rob Paprocki
 # License: MIT (see LICENSE in the repository root)
@@ -31,7 +35,8 @@ set -Eeuo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 INSTALLER="$REPO/platforms/incus/install.sh"
-WORK="${TS_TEST_WORK:-$(mktemp -d /tmp/incus-installer-test.XXXXXX)}"
+# Created in main, once the checks there pass (so an early stop leaves nothing).
+WORK="${TS_TEST_WORK:-}"
 OFFSET="${TS_TEST_PORT_OFFSET:-20000}"
 PASS=0
 FAIL=0
@@ -138,6 +143,12 @@ t_validation() {
   run_installer "$WORK/v9.log" TS_NAME=in-val TS_MEMORY=lots || true
   check_out "bad memory refused" "Invalid setting: memory limit" cat "$WORK/v9.log"
   check_out "--update of a missing instance refused" "no instance called 'in-none'" bash "$INSTALLER" --update in-none
+  check_out "  also with the name after another option" "no instance called 'in-none'" bash "$INSTALLER" --uninstall --yes in-none
+  check_out "two container names refused" "Only one container name" bash "$INSTALLER" --uninstall in-a in-b
+  check_out "two actions refused" "one of --update, --sync-ports, --resume or --uninstall" bash "$INSTALLER" --update --uninstall in-none
+  check_out "a name without an action refused" "takes its container name from the wizard or TS_NAME" bash "$INSTALLER" in-none
+  check_out "--resume without a name refused" "--resume needs the container name" bash "$INSTALLER" --resume --yes
+  check_out "unknown option refused" "Unknown option '--frobnicate'" bash "$INSTALLER" --frobnicate
   after=$(incus list --format csv -c n | sort)
   check "no instance was created by the refused runs" test "$before" == "$after"
 }
@@ -163,6 +174,12 @@ t_proxy() {
   check_out "busy host port reported" "Could not publish jackett on host port $((9117 + OFFSET))" cat "$WORK/proxy.log"
   check_out "busy port marked in the summary" "not published (host port $((9117 + OFFSET))" cat "$WORK/proxy.log"
   check_out "credentials printed" "password stub-password-123" cat "$WORK/proxy.log"
+  # Proxy mode: the creds file's URLs are the container's own bridge
+  # address and ports, which the LAN cannot reach; only the login is shown.
+  check_out "env-editor login shown without the container URL" "env-editor:  user: admin   password: stub-password-123" cat "$WORK/proxy.log"
+  check_out "FileBrowser login shown without the container URL" "FileBrowser: user: admin   password: stub-password-123" cat "$WORK/proxy.log"
+  check "no container address next to the logins" bash -c "! grep -E '^ +(env-editor|FileBrowser): +https?://' '$WORK/proxy.log'"
+  check_out "creds file note printed as is" "(until you set a real qBittorrent login" cat "$WORK/proxy.log"
   check_out "native install ran with TZ" "env TZ=Europe/Berlin" gexec "$n" cat /root/stub-calls.log
   check_out "native install got PUID" "env PUID=1000" gexec "$n" cat /root/stub-calls.log
   check_out "native install got DOWNLOADS_PATH" "env DOWNLOADS_PATH=/mnt/downloads" gexec "$n" cat /root/stub-calls.log
@@ -311,7 +328,8 @@ t_none() {
   check_out "boot.autostart false" "false" incus config get "$n" boot.autostart
   check_out "PUID 1001 passed" "env PUID=1001" gexec "$n" cat /root/stub-calls.log
   check_out "existing files inside the folder left alone" "1234:1234" stat -c %u:%g "$dl/existing-file"
-  check "uninstall" bash "$INSTALLER" --uninstall "$n" --yes
+  check "uninstall, options before the name" bash "$INSTALLER" --uninstall --yes "$n"
+  check "  instance gone" bash -c "! incus info $n"
 }
 
 # ---------------------------------------------------------------------------
@@ -422,7 +440,7 @@ t_restricted() {
 # ---------------------------------------------------------------------------
 # git mode: a git daemon on the Incus bridge stands in for GitHub.
 t_git() {
-  log "git mode: clone in the guest, then --update does git pull"
+  log "git mode: clone in the guest, then --update runs native self-update (its git step)"
   local n=in-git bare="$WORK/git/stack.git" wt="$WORK/git/wt" gw
   cleanup_instance "$n"
   rm -rf "$WORK/git"
@@ -456,7 +474,7 @@ t_git() {
     bad "update exit 0"
     tail -n 30 "$WORK/git-update.log"
   fi
-  check_out "git pull brought v2" "stub v2" gexec "$n" git -C /opt/torrent-stack log -1 --format=%s
+  check_out "self-update brought v2" "stub v2" gexec "$n" git -C /opt/torrent-stack log -1 --format=%s
   check_out "native update saw v2" "source version git-2" cat "$WORK/git-update.log"
   check_out "update names the checkout's own origin" "from git://${gw}/stack.git" cat "$WORK/git-update.log"
   # Live config vs seeds: the apps rewrite the tracked qBittorrent.conf in
@@ -643,7 +661,7 @@ PROFILES) answer default ;;
 "MEMORY LIMIT") answer 1GiB ;;
 NETWORK) answer proxy ;;
 "LISTEN ADDRESS") answer 0.0.0.0 ;;
-"PORT OFFSET") answer 20000 ;;
+"PORT OFFSET") answer "$WIZ_OFFSET" ;;
 "TIME ZONE") answer Asia/Tokyo ;;
 PUID | PGID) answer 1000 ;;
 "DOWNLOADS FOLDER") answer "" ;;
@@ -653,7 +671,7 @@ esac
 EOF
   chmod +x "$shim/whiptail"
   # The wizard only runs on a terminal: `script` provides one.
-  if env PATH="$shim:$PATH" WHIPTAIL_LOG="$WORK/whiptail.log" TS_SOURCE_DIR="$WORK/src" \
+  if env PATH="$shim:$PATH" WHIPTAIL_LOG="$WORK/whiptail.log" WIZ_OFFSET="$OFFSET" TS_SOURCE_DIR="$WORK/src" \
     script -qec "bash '$INSTALLER'" "$WORK/wizard.log" </dev/null >/dev/null 2>&1; then ok "wizard install exit 0"; else
     bad "wizard install exit 0"
     tail -n 30 "$WORK/wizard.log"
@@ -662,7 +680,7 @@ EOF
   check_out "settings confirmed" "Create the container with these settings" cat "$WORK/whiptail.log"
   check_out "limits.cpu from the wizard" "1" incus config get "$n" limits.cpu
   check_out "autostart answered no" "false" incus config get "$n" boot.autostart
-  check_out "offset from the wizard" "20000" incus config get "$n" user.torrent-stack.proxy-port-offset
+  check_out "offset from the wizard" "$OFFSET" incus config get "$n" user.torrent-stack.proxy-port-offset
   check_out "TZ from the wizard" "env TZ=Asia/Tokyo" gexec "$n" cat /root/stub-calls.log
   check "uninstall" bash "$INSTALLER" --uninstall "$n" --yes
 }
@@ -706,8 +724,40 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Every host port the tests publish must be free: if another program (or
+# another session's container) listens on one, its replies would show up as
+# confusing failures further down.
+check_ports_free() {
+  local p busy=() listening alt
+  [[ "$OFFSET" =~ ^[0-9]+$ ]] && ((OFFSET + 9191 + 1000 <= 65535)) || {
+    echo "TS_TEST_PORT_OFFSET=${OFFSET} is not a number from 0 to $((65535 - 9191 - 1000))." >&2
+    exit 1
+  }
+  if ! command -v ss >/dev/null 2>&1; then
+    echo "note: ss not found, so the host ports were not checked for other listeners."
+    return 0
+  fi
+  listening=" $(ss -Hltn 2>/dev/null | awk '{n = split($4, a, ":"); print a[n]}' | sort -un | tr '\n' ' ')"
+  # (9191+OFFSET and 8191+OFFSET+1000 are the same port, hence sort -u.)
+  for p in $(printf '%s\n' 8097 8099 $((8090 + OFFSET)) $((8081 + OFFSET)) $((8191 + OFFSET)) $((9117 + OFFSET)) \
+    $((9191 + OFFSET)) $((8081 + OFFSET + 1000)) $((8191 + OFFSET + 1000)) $((9117 + OFFSET + 1000)) \
+    $((9191 + OFFSET + 1000)) | sort -un); do
+    [[ "$listening" == *" $p "* ]] && busy+=("$p")
+  done
+  ((${#busy[@]} == 0)) && return 0
+  alt=$(
+    IFS='|'
+    echo "${busy[*]}"
+  )
+  echo "These host ports are already in use: ${busy[*]}" >&2
+  echo "  (see what holds them: ss -ltnp | grep -E ':(${alt}) ')" >&2
+  echo "The tests publish the web UIs on them. Stop what uses them, or pick other" >&2
+  echo "ports, e.g.: TS_TEST_PORT_OFFSET=40000 bash $0 $1" >&2
+  exit 1
+}
+
 main() {
-  local tests=() t
+  local tests=() t args="$*"
   while (($#)); do
     case "$1" in
     --with-lan) WITH_LAN=1 ;;
@@ -723,6 +773,13 @@ main() {
     echo "run as root" >&2
     exit 1
   }
+  # Only the validation and lan-* tests publish no ports on the host.
+  for t in "${tests[@]}"; do
+    [[ "$t" == validation || "$t" == lan-* ]] && continue
+    check_ports_free "$args"
+    break
+  done
+  [[ -n "$WORK" ]] || WORK=$(mktemp -d /tmp/incus-installer-test.XXXXXX)
   mkdir -p "$WORK"
   echo "Work folder: $WORK"
   # The idmap downloads mapping adds root:<id>:1 lines to these host files;

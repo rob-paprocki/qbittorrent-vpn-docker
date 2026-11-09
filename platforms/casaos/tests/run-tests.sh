@@ -15,10 +15,12 @@
 # compose.yaml). With CASAOS_APPSTORE_DIR=<checkout of IceWhaleTech/
 # CasaOS-AppStore> it also runs the AppStore's own validator.
 #
-# Needs: bash, python3 with PyYAML, docker compose (for `config` only, no
-# daemon calls), script(1) for the wizard tests, and either internet access
-# to pypi.org (to build a venv with bcrypt for the seeding CLI) or
-# CASAOS_TEST_PYTHON=/path/to/python-with-bcrypt. Optional: busybox (or
+# Needs: bash, python3 (3.8 or later) with PyYAML, docker compose (for
+# `config` only, no daemon calls; tested with 5.6.1), and script(1) for the
+# wizard tests. The seeding CLI needs only the standard library, and the
+# tests put a stub search plugin in place first, so it downloads nothing.
+# CASAOS_TEST_PYTHON=/path/to/python3 picks the python3 that install.sh
+# finds "on the box" (default: the python3 on PATH). Optional: busybox (or
 # CASAOS_TEST_BUSYBOX=/path/to/busybox) to run one update with busybox's tar,
 # as ZimaOS may have. Run as root (install.sh requires it), from anywhere:
 #   bash platforms/casaos/tests/run-tests.sh
@@ -94,22 +96,19 @@ mkdir -p "$SRC"
 tar -C "$REPO" --exclude=./.git --exclude=./.env --exclude=./configs/env-editor \
   --exclude=./scripts/env-editor/.venv --exclude='*/__pycache__' -cf - . | tar -C "$SRC" -xf -
 
-# A python with bcrypt for the seeding CLI (FileBrowser's password hash).
-PY_BCRYPT="${CASAOS_TEST_PYTHON:-}"
-if [[ -z "$PY_BCRYPT" ]]; then
-  if python3 -m venv "$WORK/venv" >/dev/null 2>&1 &&
-    "$WORK/venv/bin/python" -m pip install -q --disable-pip-version-check bcrypt==5.0.0 >/dev/null 2>&1; then
-    PY_BCRYPT="$WORK/venv/bin/python"
-  else
-    echo "Could not build a venv with bcrypt (no pypi.org?). Set CASAOS_TEST_PYTHON to a python3 that has bcrypt." >&2
-    exit 1
-  fi
-fi
-# A PATH entry whose python3 has bcrypt: install.sh then seeds on the host.
-# (A wrapper, not a symlink: a venv's python must be run by its own path to
+# The python3 the seeding CLI runs on, on "the box" and in the seeding
+# container stand-in. `--only jackett,qbit` needs only the standard library
+# (FileBrowser is not seeded), so any python3 3.8+ will do.
+PY_HOST="${CASAOS_TEST_PYTHON:-$(command -v python3)}"
+[[ -x "$PY_HOST" ]] || {
+  echo "No python3 found (set CASAOS_TEST_PYTHON=/path/to/python3)." >&2
+  exit 1
+}
+# A PATH entry with that python3: install.sh then seeds on the host. (A
+# wrapper, not a symlink: a venv's python must be run by its own path to
 # find its packages.)
 mkdir -p "$WORK/hostpy"
-printf '#!/bin/sh\nexec %q "$@"\n' "$PY_BCRYPT" >"$WORK/hostpy/python3"
+printf '#!/bin/sh\nexec %q "$@"\n' "$PY_HOST" >"$WORK/hostpy/python3"
 chmod +x "$WORK/hostpy/python3"
 
 # The fake app-management.
@@ -156,7 +155,7 @@ run_inst() {
   shift
   LOG="$OUT/$name.log"
   set +e
-  env PATH="$SHIM_PATH" CASAOS_SHIM_STATE="$STATE" CASAOS_SHIM_PYTHON="$PY_BCRYPT" \
+  env PATH="$SHIM_PATH" CASAOS_SHIM_STATE="$STATE" CASAOS_SHIM_PYTHON="$PY_HOST" \
     CASAOS_SHIM_PROC="$PROC" TS_PROC_DIR="$PROC" TS_UI_WAIT=3 \
     TS_CASAOS_API="$API" TS_CASAOS_APPS_DIR="$APPS_DIR" TS_APPDATA="$APPDATA" \
     TS_DOWNLOADS="$DOWNLOADS" TS_SOURCE_DIR="$SRC" TS_WAIT=20 TS_POLL_INTERVAL=0 TS_UI=plain \
@@ -175,7 +174,7 @@ run_tty() {
   while [[ $# -gt 0 && "$1" != -- ]]; do envs+=("$1"); shift; done
   shift
   LOG="$OUT/$name.log"
-  cmd=$(printf '%q ' env PATH="$SHIM_PATH" CASAOS_SHIM_STATE="$STATE" CASAOS_SHIM_PYTHON="$PY_BCRYPT" \
+  cmd=$(printf '%q ' env PATH="$SHIM_PATH" CASAOS_SHIM_STATE="$STATE" CASAOS_SHIM_PYTHON="$PY_HOST" \
     CASAOS_SHIM_PROC="$PROC" TS_PROC_DIR="$PROC" TS_UI_WAIT=3 \
     TS_CASAOS_API="$API" TS_CASAOS_APPS_DIR="$APPS_DIR" TS_APPDATA="$APPDATA" \
     TS_DOWNLOADS="$DOWNLOADS" TS_SOURCE_DIR="$SRC" TS_WAIT=20 TS_POLL_INTERVAL=0 \
@@ -430,7 +429,7 @@ cp "$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf" "$WORK/migrated.con
 mkdir -p "$WORK/legacy/qbittorrent/qBittorrent/nova3/engines"
 cp "$WORK/migrated.conf" "$WORK/legacy/qbittorrent/qBittorrent/qBittorrent.conf"
 echo stub >"$WORK/legacy/qbittorrent/qBittorrent/nova3/engines/jackett.py"
-"$PY_BCRYPT" -I -c 'import sys; sys.dont_write_bytecode=True; sys.path.insert(0, sys.argv[1]); import seed_configs; from pathlib import Path; seed_configs.seed_qbittorrent(Path(sys.argv[2]), "admin", sys.argv[3])' \
+"$PY_HOST" -I -c 'import sys; sys.dont_write_bytecode=True; sys.path.insert(0, sys.argv[1]); import seed_configs; from pathlib import Path; seed_configs.seed_qbittorrent(Path(sys.argv[2]), "admin", sys.argv[3])' \
   "$REPO/scripts/env-editor" "$WORK/legacy" "Legacy-Only-Pass-4"
 check "the seeding CLI alone on a migrated conf: fake qBittorrent accepts the new login" \
   qbit_accepts "$WORK/legacy/qbittorrent/qBittorrent/qBittorrent.conf" admin "Legacy-Only-Pass-4"

@@ -124,8 +124,11 @@ usage() {
   cat <<EOF
 Usage (wherever the incus command can manage the Incus server):
   install.sh                       Create a new container and install the stack.
-  install.sh --update [NAME]       git pull + native/install.sh update in an existing
-                                   container, then re-publish the web UI ports.
+  install.sh --update [NAME]       Run native/install.sh self-update in an existing
+                                   container (new repository version with the live
+                                   app configs kept, Debian package upgrades, then
+                                   only the changed parts), then re-publish the
+                                   web UI ports.
   install.sh --sync-ports [NAME]   Re-publish the web UI ports after changing them
                                    in the env-editor (proxy network mode only).
   install.sh --resume NAME         Re-run the in-container install on a container
@@ -135,7 +138,8 @@ Usage (wherever the incus command can manage the Incus server):
                                    the host is never touched.
   install.sh --unattended          No wizard: take settings from TS_* variables.
   install.sh --help
-NAME defaults to \$TS_NAME, else torrent-stack.
+NAME defaults to \$TS_NAME, else torrent-stack. Options and NAME can come in
+any order: --uninstall NAME --yes and --uninstall --yes NAME do the same.
 
 Environment variables (all optional; they also pre-fill the wizard):
   TS_SOURCE_DIR=/path   Copy this local checkout into the container instead of
@@ -1628,12 +1632,28 @@ print_credentials() {
   fi
   # Every line of the file: the env-editor login, and FileBrowser's (the
   # same password until a real qBittorrent login is set). The URLs in it
-  # are the container's own address; in proxy mode use the ones above.
+  # are the container's own address and ports. In proxy mode those cannot
+  # be reached from the LAN (and differ with an offset), so only the login
+  # part is shown here; the addresses to open are the ones printed above.
+  local mode re='^([^[:space:]]+:)[[:space:]]+https?://[^[:space:]]+[[:space:]]+(.*)$'
+  mode=$(inc config get "$INST" "$KEY_MODE" 2>/dev/null || true)
   echo
   echo "  ${BOLD}First-run logins, keep them safe:${CL}"
-  while IFS= read -r l; do echo "    $(trim "$l")"; done <<<"$creds"
+  while IFS= read -r l; do
+    l=$(trim "$l")
+    if [[ "$mode" == proxy && "$l" =~ $re ]]; then
+      printf '    %-13s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    else
+      echo "    $l"
+    fi
+  done <<<"$creds"
   echo "  (Saved in ${GUEST_CREDS} inside the container: incus exec $(shown_inst) -- cat ${GUEST_CREDS}"
-  echo "   Note them somewhere safe, then delete that file.)"
+  if [[ "$mode" == proxy ]]; then
+    echo "   That file lists the container's own addresses; from your network, use the"
+    echo "   host addresses above. Note the logins somewhere safe, then delete that file.)"
+  else
+    echo "   Note them somewhere safe, then delete that file.)"
+  fi
 }
 
 print_next_steps() {
@@ -1838,20 +1858,14 @@ The downloads folder ${dl} on the host is NOT touched."
 # ---------------------------------------------------------------------------
 main() {
   local action=install target=""
+  # One action flag, the options, and at most one container name, in any
+  # order (so "--uninstall --yes NAME" works as well as "--uninstall NAME --yes").
   while (($#)); do
     case "$1" in
-    --update | --sync-ports | --uninstall)
+    --update | --sync-ports | --uninstall | --resume)
+      [[ "$action" == install || "$action" == "${1#--}" ]] ||
+        die "Use one of --update, --sync-ports, --resume or --uninstall at a time (got --${action} and $1)."
       action=${1#--}
-      if [[ -n "${2:-}" && "$2" != -* ]]; then
-        target=$2
-        shift
-      fi
-      ;;
-    --resume)
-      action=resume
-      [[ -n "${2:-}" && "$2" != -* ]] || die "--resume needs the container name."
-      target=$2
-      shift
       ;;
     --unattended) UNATTENDED=1 ;;
     --yes | -y) ASSUME_YES=1 ;;
@@ -1859,10 +1873,19 @@ main() {
       usage
       exit 0
       ;;
-    *) die "Unknown argument '$1' (see --help)." ;;
+    -*) die "Unknown option '$1' (see --help)." ;;
+    "") die "An empty argument was given where a container name was expected." ;;
+    *)
+      [[ -z "$target" ]] || die "Only one container name, please (got '${target}' and '$1')."
+      target=$1
+      ;;
     esac
     shift
   done
+  if [[ -n "$target" && "$action" == install ]]; then
+    die "A new install takes its container name from the wizard or TS_NAME, not from '${target}' (see --help)."
+  fi
+  [[ "$action" == resume && -z "$target" ]] && die "--resume needs the container name: install.sh --resume NAME"
   [[ -n "$target" ]] && NAME=$target
   if [[ "$action" != install ]]; then
     valid_name "$NAME" || die "'${NAME}' is not a valid container name."

@@ -390,7 +390,7 @@ def gluetun_env(s: dict, gluetun_ids: tuple[int, int]) -> str:
         ("VPN_PORT_FORWARDING", env.get("VPN_PORT_FORWARDING", "")),
         ("SERVER_COUNTRIES", env.get("SERVER_COUNTRIES", "")),
         ("TZ", s["tz"]),
-        # Run through /bin/sh: the script is not marked executable in git.
+        # Through /bin/sh, so the script's executable bit does not matter.
         ("VPN_PORT_FORWARDING_UP_COMMAND", f"/bin/sh {root / 'update-qbittorrent.sh'}"),
         ("QBIT_WEBUI_PORT", str(ports["qbittorrent"])),
         ("QBITTORRENT_USER", env.get("QBITTORRENT_USER", "")),
@@ -869,10 +869,10 @@ def move_webui_keys(text: str) -> tuple[str, list[tuple[str, str]]]:
 
     qBittorrent 5.3 and later read web UI settings from a [WebUI] section
     (their settings migration 11 moves them there once, on first start).
-    The env-editor's seeder writes the old [Preferences] WebUI\\... keys,
-    so after that first start a re-seeded password would be ignored. The
-    native install moves such keys into [WebUI] itself, exactly as that
-    migration does (newest value wins).
+    The env-editor's seeder always writes the old [Preferences] WebUI\\...
+    keys (and, once a file is migrated, [WebUI] too). The native install
+    moves any such old keys into [WebUI] itself, exactly as that migration
+    does (newest value wins), so a stray old key cannot linger.
     """
     out, moved, section = [], [], None
     for line in text.splitlines():

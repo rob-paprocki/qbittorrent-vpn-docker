@@ -100,8 +100,11 @@ usage() {
   cat <<EOF
 Usage (as root on the Proxmox VE host):
   install.sh                    Create a new container and install the stack.
-  install.sh --update [CTID]    Update the stack in an existing container
-                                (git pull + native/install.sh update).
+  install.sh --update [CTID]    Update the stack in an existing container: runs
+                                native/install.sh self-update in it (new
+                                repository version with the live app configs
+                                kept, Debian package upgrades, then only the
+                                changed parts).
   install.sh --resume CTID      Re-run the in-container install on a container
                                 this script created (after a failed run). Reuses
                                 the answers kept in

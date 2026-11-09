@@ -12,7 +12,7 @@ The installer is one script, [`install.sh`](install.sh). It asks a few questions
 * **A root shell on the box.**
   * CasaOS: SSH in (or use the machine's console) and run `sudo -i`.
   * ZimaOS: *Settings > General > Developer Mode* turns on SSH and a web terminal. ZimaOS asks you to set the root password with a monitor attached the first time.
-* **Internet access** from the box (GitHub, the container registries, pypi.org for the seeding helper).
+* **Internet access** from the box (GitHub, including raw.githubusercontent.com for the qBittorrent search plugin, and the container registries).
 * **A VPN account that supports port forwarding through Gluetun**: ProtonVPN, Private Internet Access, Perfect Privacy or PrivateVPN. Have the WireGuard *PrivateKey* and *Address* lines ready (or the OpenVPN username and password). Other Gluetun providers connect, but qBittorrent's port stays closed and nothing seeds. See the [Gluetun port-forwarding list](https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/vpn-port-forwarding.md).
 * **Free ports** 8090 (qBittorrent), 9117 (Jackett), 8191 (FlareSolverr), 8081 (FileBrowser), or pick others in the wizard.
 * An **amd64 or arm64** machine (ZimaBoard, ZimaCube, Raspberry Pi 4/5, any x86 PC).
@@ -31,7 +31,7 @@ The installer is one script, [`install.sh`](install.sh). It asks a few questions
    * **Time zone**: taken from the box.
    * **VPN provider** and **protocol**, then the **WireGuard private key** and **address** (or the OpenVPN username and password). Typed keys and passwords are hidden.
    * **Server countries**, for example `Netherlands,Switzerland`.
-   * **qBittorrent user and password**. Leave the password empty and one is generated and shown at the end. FileBrowser's user `admin` gets the same password, so it must be 5 to 72 characters long and not `admin` (FileBrowser cannot take those; the installer says so).
+   * **qBittorrent user and password**. Leave the password empty and one is generated and shown at the end. FileBrowser's user `admin` gets the same password, so it must be 5 to 72 bytes long (letters outside A-Z take 2-4 bytes each) and not `admin` (FileBrowser cannot take those; the installer says so).
    * **Discord webhook** (optional), for "port updated" messages.
    * **Web UI ports**: change them only if another app already uses one. These are the ports on the box; inside, Jackett and FlareSolverr keep their own ports (9117 and 8191), so changing them is safe.
    * **Automatic updates**: see [Updating](#updating). The default is no.
@@ -300,12 +300,12 @@ The qBittorrent `[WebUI]` fix was also checked against the real `lscr.io/linuxse
 * CasaOS on Ubuntu, Raspberry Pi OS or arm64.
 * Clicking through the dashboard itself (the Import dialog, the settings dialog, the Restart button); its code was read, and Restart was tested through the same API call.
 * The nightly cron line on a real box.
-* The seeding container against real pypi from inside nested Docker (this test machine intercepts TLS, which the throwaway python container does not trust). The same container command is exercised by the Unraid installer's tests.
+* The seeding container downloading the search plugin from GitHub from inside nested Docker (this test machine intercepts TLS, which the throwaway python container does not trust). The same container command is exercised by the Unraid installer's tests.
 * FileBrowser with a `PUID` other than 1000 under CasaOS itself (only the real image on plain Docker, and the permission checks in the shim tests), and deleting qBittorrent's downloads from FileBrowser in that case (see [Limitations](#limitations-and-known-issues)).
 * The VueTorrent theme. Its docker mod is downloaded from ghcr.io inside the qBittorrent container, which hit the same TLS limit here.
 * Real Gluetun with the IPv6 sysctl (the test kernel has `ipv6.disable=1`).
 
-Run the tests yourself (root, a throwaway Linux machine with Docker Compose and python3-yaml):
+Run the tests yourself (root, a throwaway Linux machine with Docker Compose and python3-yaml; the suite passed with Docker Compose 5.6.1 and 2.20.1, and needs no internet access):
 
 ```bash
 bash platforms/casaos/tests/run-tests.sh

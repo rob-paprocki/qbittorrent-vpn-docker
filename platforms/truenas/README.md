@@ -191,7 +191,7 @@ The other variables are `TS_APP_NAME`, `TS_POOL`, `TS_DATASET`, `TS_DOWNLOADS_DA
 If you'd rather paste the YAML into **Apps > Discover Apps > Install via YAML** yourself, the installer can print it:
 
 ```bash
-bash -c "$(curl -fsSL .../platforms/truenas/install.sh)" install.sh --print-yaml > /root/torrent-stack.yaml
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/rob-paprocki/qbittorrent-vpn-docker/main/platforms/truenas/install.sh)" install.sh --print-yaml > /root/torrent-stack.yaml
 ```
 
 The file holds your secrets. Delete it after pasting.
@@ -199,7 +199,7 @@ The file holds your secrets. Delete it after pasting.
 `--print-yaml` changes nothing, so do the rest yourself first:
 
 1. Create the datasets.
-2. Create the folders the YAML mounts.
+2. Create the folders the YAML mounts. Make `configs/filebrowser` owned by `1000:PGID` with mode 2770 (`chown 1000:PGID` and `chmod 2770`): FileBrowser runs as uid 1000 and keeps its database there, and in a folder it cannot write to it keeps restarting with "unable to open database file".
 3. Copy `update-qbittorrent.sh` to the `source` path the YAML names. Make it root-owned, mode 755.
 4. Do the first-run steps from [Doing it manually](../../README.md#doing-it-manually-without-the-editor) in the main README.
 

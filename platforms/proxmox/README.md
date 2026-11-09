@@ -212,7 +212,7 @@ There was no Proxmox VE host to test on. What was done instead:
 
 * `bash -n` and `shellcheck -S warning` are clean on `install.sh`, `tests/run-tests.sh` and `tests/shims/whiptail`.
 * **Command stand-ins.** `tests/shims/` has stand-ins for `pct`, `pveam`, `pvesm`, `pvesh`, `pveversion`, `whiptail` (answers come from environment variables), `timedatectl`, `modprobe`, `modinfo` and `dpkg`. They record every call. The `pct` stand-in checks `pct create` and `pct set` against the official Proxmox VE API schema (the same `apidoc.js` the [pct manual](https://pve.proxmox.com/pve-docs/pct.1.html) is generated from): option names, types, ranges, enums, patterns and the property strings for `net0`, `dev0`, `mp0`, `rootfs` and `features`. The formats are re-implemented after Proxmox's `pve-common` and `pve-container` source. A self-test shows it rejects 16 kinds of bad arguments. Like `pct`, it refuses `exec` and `push` on a stopped container.
-* **Record tests** (250 checks, no containers). For these the `pct` stand-in also answers `test -f` and `cat` from the files that were pushed, and it can pretend the container gets no IPv4 address or does not start. Checked:
+* **Record tests** (259 checks, 20 of them the self-test above; no containers). For these the `pct` stand-in also answers `test -f` and `cat` from the files that were pushed, and it can pretend the container gets no IPv4 address or does not start. Checked:
   * the exact `pct create` arguments for Default, Advanced (static IP, gateway in subnet, VLAN, DNS, SSH key, password retry, Do-Over) and Proxmox VE 8.0;
   * Do-Over: the password and SSH key from the first pass can be kept, or cleared by leaving them empty;
   * the root password reaching only `chpasswd`'s stdin, never a command line or a log;
@@ -243,7 +243,7 @@ There was no Proxmox VE host to test on. What was done instead:
   * `--resume 9501` with a stale `/root/torrent-stack-9501-install.log` on the host: finished, kept the existing checkout, removed that log;
   * `native/install.sh install`'s output appeared while it ran.
   The test network intercepts HTTPS, so the stand-in added its CA to the container (after boot, with a check that it reached the CA bundle).
-* Run them yourself as root: `platforms/proxmox/tests/run-tests.sh record` (fast), or `incus` for the real-container part. Both need the Proxmox `apidoc.js` file; see the script header. If the test machine has no `/etc/pve`, the runner creates an empty one only for the run and removes it afterwards.
+* Run them yourself as root: `platforms/proxmox/tests/run-tests.sh record` (fast), or `incus` for the real-container part. Both check every `pct` call against the Proxmox API schema, `apidoc.js`: the runner downloads it with `curl` from <https://pve.proxmox.com/pve-docs/api-viewer/apidoc.js> and deletes it at the end. Offline, download it first (`curl -fsSLo apidoc.js https://pve.proxmox.com/pve-docs/api-viewer/apidoc.js`) and run with `TS_TEST_APIDOC=$PWD/apidoc.js`. If the test machine has no `/etc/pve`, the runner creates an empty one only for the run and removes it afterwards.
 
 Not tested:
 

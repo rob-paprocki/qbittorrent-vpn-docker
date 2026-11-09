@@ -73,6 +73,11 @@ case "${1:-}" in
     if [[ -n "${SHIM_EXTRA_CA:-}" && -f "${SHIM_EXTRA_CA}" ]]; then
       extra+=(-v "${SHIM_EXTRA_CA}:/etc/ssl/test-extra-ca.crt:ro"
         -e SSL_CERT_FILE=/etc/ssl/test-extra-ca.crt -e PIP_CERT=/etc/ssl/test-extra-ca.crt)
+    elif [[ -n "${SHIM_EXTRA_CA:-}" ]]; then
+      # Say so: the seeding then fails with a TLS error and many checks
+      # fail after it, with no other hint.
+      echo "shim: SHIM_EXTRA_CA=${SHIM_EXTRA_CA} not found inside the test namespace" \
+        "(run-tests.sh replaces /usr/local with the fake Unraid tree; put the CA file elsewhere)" >&2
     fi
     if [[ "${SHIM_SEED_FAIL:-0}" == 1 ]]; then
       echo "shim: seeding container failed on purpose" >&2

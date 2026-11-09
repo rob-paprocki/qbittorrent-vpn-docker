@@ -24,6 +24,10 @@
 # License: MIT (see LICENSE in the repository root)
 
 set -Eeuo pipefail
+# The checks import scripts/env-editor/*.py: write no __pycache__ into the
+# checkout (the Incus installer and tests copy the checkout as it is).
+# python3 -I ignores PYTHON* variables, so its calls below also pass -B.
+export PYTHONDONTWRITEBYTECODE=1
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -87,7 +91,7 @@ if docker compose version >/dev/null 2>&1; then
     bash -c 'eval "$(sed -n "/^env_get() {/,/^}/p" "$1")"; for k in $3; do printf "%s\0%s\0" "$k" "$(env_get "$2" "$k")"; done' \
       _ "$REPO/platforms/$f/install.sh" "$WORK/.env" "$KEYS" >"$WORK/bash-$f.out"
   done
-  if out=$(python3 -I - "$REPO/scripts/env-editor" "$WORK" <<'PY'
+  if out=$(python3 -I -B - "$REPO/scripts/env-editor" "$WORK" <<'PY'
 import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
@@ -118,7 +122,7 @@ fi
 
 # --- 2. seeding CLI: plugin pin and [WebUI] ----------------------------------
 echo "== seed_configs.py: pinned search plugin, qBittorrent 5 [WebUI]"
-if out=$(python3 -I - "$REPO" "$WORK" <<'PY' 2>&1
+if out=$(python3 -I -B - "$REPO" "$WORK" <<'PY' 2>&1
 import hashlib, io, sys
 from pathlib import Path
 repo, work = Path(sys.argv[1]), Path(sys.argv[2])

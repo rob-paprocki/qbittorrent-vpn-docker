@@ -1330,14 +1330,15 @@ check_inline_values() {
 # filebrowser_password_problem PASSWORD: compose.yaml gives FileBrowser's
 # "admin" user the qBittorrent password (FILEBROWSER_ADMIN_PASSWORD), set
 # again on every start. FileBrowser Quantum 2.0 ignores the value "admin"
-# (it then makes up a password of its own), refuses fewer than 5 characters
+# (a new database then gets a random password, an existing one keeps its
+# old one), refuses fewer than 5 characters
 # when it sets the password on a later start, and its bcrypt hash cannot
 # take more than 72 bytes. Prints why PASSWORD would not work, or nothing.
 filebrowser_password_problem() {
   local n
   n=$(printf '%s' "$1" | wc -c)
   if [[ "$1" == admin ]]; then
-    echo "FileBrowser ignores the password 'admin' (it would make up one of its own)"
+    echo "FileBrowser ignores the password 'admin' (it would make up its own, or keep the old one)"
   elif ((n < 5)); then
     echo "FileBrowser needs at least 5 characters"
   elif ((n > 72)); then

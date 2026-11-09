@@ -20,8 +20,12 @@
 #
 # Usage (as root): platforms/proxmox/tests/run-tests.sh [record|incus|incus1|incus2|all]
 #   TS_TEST_WORK=dir     work directory (default: a new temp dir)
-#   TS_TEST_APIDOC=file  Proxmox apidoc.js (default: downloaded from
-#                        https://pve.proxmox.com/pve-docs/api-viewer/apidoc.js)
+#   TS_TEST_APIDOC=file  Proxmox apidoc.js. Without it the runner uses
+#                        TS_TEST_WORK/apidoc.js if that exists, else it
+#                        downloads a fresh copy (curl, before it leaves the
+#                        host's network) from
+#                        https://pve.proxmox.com/pve-docs/api-viewer/apidoc.js
+#                        and deletes it again at the end.
 #
 # License: MIT (see LICENSE in the repository root).
 
@@ -43,14 +47,29 @@ if [[ -z "${TS_TEST_IN_NS:-}" ]]; then
   # none, make one for the run and remove it afterwards, so tools that take
   # "/etc/pve exists" to mean "this is Proxmox" are not fooled later.
   MADE_ETC_PVE=0
+  APIDOC_TMP=""
   # shellcheck disable=SC2329  # called by the EXIT trap
   outer_cleanup() {
     if ((MADE_ETC_PVE)) && ! rmdir /etc/pve 2>/dev/null; then
       echo "WARNING: could not remove the empty /etc/pve this test run created" >&2
     fi
+    [[ -z "$APIDOC_TMP" ]] || rm -f -- "$APIDOC_TMP"
   }
   trap outer_cleanup EXIT
   trap 'exit 130' INT TERM
+  # The pct stand-in checks every call against the official API schema.
+  # The test namespace below has no network, so fetch it here if needed.
+  if [[ -z "${TS_TEST_APIDOC:-}" && ! -s "${TS_TEST_WORK:-/nonexistent}/apidoc.js" ]]; then
+    APIDOC_TMP=$(mktemp)
+    echo "Downloading the Proxmox VE API schema (apidoc.js) ..."
+    if ! curl -fsSL --max-time 300 -o "$APIDOC_TMP" https://pve.proxmox.com/pve-docs/api-viewer/apidoc.js; then
+      echo "Could not download apidoc.js. Download it yourself:" >&2
+      echo "  curl -fsSLo apidoc.js https://pve.proxmox.com/pve-docs/api-viewer/apidoc.js" >&2
+      echo "then run again with TS_TEST_APIDOC=\$PWD/apidoc.js" >&2
+      exit 1
+    fi
+    export TS_TEST_APIDOC="$APIDOC_TMP"
+  fi
   if [[ ! -e /etc/pve ]]; then
     mkdir /etc/pve
     MADE_ETC_PVE=1
@@ -83,12 +102,19 @@ cleanup_tests() {
 }
 trap cleanup_tests EXIT
 
+# Checked before anything is created, so a missing file leaves nothing behind.
+APIDOC="${TS_TEST_APIDOC:-${TS_TEST_WORK:-/nonexistent}/apidoc.js}"
+if [[ ! -s "$APIDOC" ]]; then
+  echo "apidoc.js not found at $APIDOC (see the header of $0)." >&2
+  exit 1
+fi
+APIDOC="$(cd "$(dirname "$APIDOC")" && pwd)/$(basename "$APIDOC")"
+
 WORK="${TS_TEST_WORK:-$(mktemp -d)}"
 mkdir -p "$WORK"
 WORK="$(cd "$WORK" && pwd)"
 STATE="$WORK/state"
 BIN="$WORK/bin"
-APIDOC="${TS_TEST_APIDOC:-$WORK/apidoc.js}"
 
 mount --make-rprivate /
 mount -t sysfs sysfs /sys
@@ -109,12 +135,6 @@ mount --bind "$WORK/etc-pve" /etc/pve
 mount --bind "$WORK/subuid" /etc/subuid
 mount --bind "$WORK/subgid" /etc/subgid
 mount --bind "$WORK/modules-load.d" /etc/modules-load.d
-
-if [[ ! -s "$APIDOC" ]]; then
-  # The network namespace has no route out; fetch through the host's.
-  echo "apidoc.js not found at $APIDOC: download it first (see header)." >&2
-  exit 1
-fi
 
 mkdir -p "$BIN"
 for t in pct pveam pvesm pvesh pveversion timedatectl modprobe modinfo dpkg; do
@@ -914,7 +934,7 @@ incus_tests_2() {
   check "without a creds file the login comes from the installer output" contains "$OUT" "first-run login:      user admin   password StubPassw0rd-xyz"
   check "--resume ran native install" contains "$(gx $id cat /root/native-stub.log)" "=== args: install"
 
-  scenario "I2b --update on a git checkout: git pull --ff-only, then native update"
+  scenario "I2b --update on a git checkout: native self-update (git step, then update)"
   run_installer PVE_SHIM_VERSION=8.0.4 TS_UNATTENDED=1 -- --update $id
   check "exit 0" eq "$RC" 0
   check "pulled from git" contains "$OUT" "Repository already up to date"

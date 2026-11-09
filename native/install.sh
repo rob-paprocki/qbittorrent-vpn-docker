@@ -814,7 +814,7 @@ write_creds_file() {
 # Note them somewhere safe, then delete this file.
 env-editor:  http://$ip:$ENV_EDITOR_PORT   user: admin   password: $FIRST_RUN_PASSWORD
 FileBrowser: http://$ip:${S[port_filebrowser]}   user: admin   password: $FIRST_RUN_PASSWORD
-  (until you set QBITTORRENT_USER / QBITTORRENT_PASSWORD; then it uses those)
+  (until you set a real qBittorrent login; then admin uses QBITTORRENT_PASSWORD)
 EOF
     )
 }
@@ -1417,7 +1417,7 @@ cmd_reset_login() {
     msg_ok "New env-editor login:   user admin   password $FIRST_RUN_PASSWORD"
     echo "    (also saved in $CREDS_FILE; delete that file once noted)"
     if [[ "${S[qbit_configured]}" != yes ]]; then
-        echo "    FileBrowser uses the same login until you set QBITTORRENT_USER / QBITTORRENT_PASSWORD."
+        echo "    FileBrowser (user admin) uses the same password until you set a real qBittorrent login; then QBITTORRENT_PASSWORD."
     fi
     [[ -z "$START_FAILED" ]] || die "the env-editor did not restart (journalctl -u torrent-env-editor)"
 }

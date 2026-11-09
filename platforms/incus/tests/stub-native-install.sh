@@ -120,6 +120,7 @@ install)
 # torrent-stack first-run logins (stub).
 env-editor:  http://$ip:9191   user: admin   password: $STUB_PASSWORD
 FileBrowser: http://$ip:$(port_of FILEBROWSER_PORT)   user: admin   password: $STUB_PASSWORD
+  (until you set a real qBittorrent login; then admin uses QBITTORRENT_PASSWORD)
 EOF
     )
     echo "    first-run login:      user admin   password $STUB_PASSWORD"

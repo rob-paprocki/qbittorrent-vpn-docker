@@ -55,7 +55,7 @@ GitHub Actions references in `.github/workflows/*.yml` are pinned too, and those
 - **Source:** [`gtsteffaniak/filebrowser`](https://github.com/gtsteffaniak/filebrowser) (the actively maintained fork); environment variables: <https://filebrowserquantum.com/en/docs/reference/environment-variables/>
 - **What `compose.yaml` relies on:**
   - `FILEBROWSER_DATABASE_PATH=/config/database.sqlite`: the database (users, shares, settings, the login signing key) lives in the mounted `configs/filebrowser`. Without it the image keeps the database under `/home/filebrowser/data`, which is not mounted, and loses it whenever the container is recreated.
-  - `FILEBROWSER_ADMIN_PASSWORD=${QBITTORRENT_PASSWORD}`: on every start FileBrowser sets the password of its `admin` user to this value (its default admin user name is `admin`; no environment variable changes that). The log then says `Using admin password from FILEBROWSER_ADMIN_PASSWORD environment variable`. Passwords need at least 5 characters, and at most 72 bytes (bcrypt hashes); the value `admin` (like an empty one) is ignored, and FileBrowser then makes up a password of its own.
+  - `FILEBROWSER_ADMIN_PASSWORD=${QBITTORRENT_PASSWORD}`: on every start FileBrowser sets the password of its `admin` user to this value (its default admin user name is `admin`; no environment variable changes that). The log then says `Using admin password from FILEBROWSER_ADMIN_PASSWORD environment variable`. Passwords need at least 5 characters, and at most 72 bytes (bcrypt hashes); the value `admin` (like an empty one) is ignored: a new database then gets a random password that FileBrowser logs once, and an existing one keeps its stored password ([auth.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/auth.go) `ConfigTriggersAdminPasswordReset`, [bootstrap_admin_password.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/state/bootstrap_admin_password.go)).
   - The image runs as uid 1000 whatever `PUID` is; `group_add: ["${PGID}"]` lets it use the stack's folders through the PGID group.
   - The downloads are mounted at `/srv/downloads`, and nothing else: the mount must stay inside the downloads tree, because `configs/` and `.env` hold secrets.
 - **Breaking signals:** a rename of either environment variable (the database would silently go back to unmounted storage, and the `admin` password to a generated one printed in the log), a change of the image's uid, or of the default admin user name. After an image update, check the log for the two lines `Using admin password from FILEBROWSER_ADMIN_PASSWORD environment variable` and `SQLite database initialized at /config/database.sqlite`. The TrueNAS installer refuses a `compose.yaml` whose FileBrowser database is outside the configs dataset.
@@ -122,11 +122,11 @@ python3 -m venv /tmp/lock && /tmp/lock/bin/pip install pip-tools==7.5.2
 
 `update` rebuilds a venv next to the old one when its lock file changed, and swaps it in only once pip succeeded.
 
-**bcrypt** (in `env-editor.txt`, and `bcrypt>=4.0` in `requirements.txt` for Docker mode) hashes the env-editor's own login, and in Docker mode the FileBrowser seeder's unused `settings.yaml`. Since 5.0 it raises `ValueError` for a password longer than 72 bytes instead of cutting it short (checked with bcrypt 5.0.0). FileBrowser has the same 72-byte limit, which is why the Unraid and Synology installers refuse longer qBittorrent passwords.
+**bcrypt** (in `env-editor.txt`, and `bcrypt>=4.0` in `requirements.txt` for Docker mode) hashes the env-editor's own login, and in Docker mode the FileBrowser seeder's unused `settings.yaml`. Since 5.0 it raises `ValueError` for a password longer than 72 bytes instead of cutting it short (checked with bcrypt 5.0.0). FileBrowser has the same 72-byte limit, which is why the Unraid and CasaOS installers refuse longer qBittorrent passwords (the Synology and TrueNAS installers do not check it yet).
 
 ### The seeding image
 
-`python:3.14.9-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8`, pinned by tag and digest as `SEED_IMAGE` in three places that must be kept in step: `platforms/unraid/install.sh`, `platforms/synology/install.sh` and `platforms/casaos/install.sh`. It runs `seed_configs.py --only jackett,qbit` (standard library only, nothing pip-installed) when the host has no usable `python3`: always on Unraid, as a fallback on Synology (which also uses it for the FileBrowser write check) and CasaOS, and always on ZimaOS. TrueNAS seeds with TrueNAS's own `python3` and needs no image.
+`python:3.14.9-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8`, pinned by tag and digest as `SEED_IMAGE` in three places that must be kept in step: `platforms/unraid/install.sh`, `platforms/synology/install.sh` and `platforms/casaos/install.sh`. It runs `seed_configs.py --only jackett,qbit` (standard library only, nothing pip-installed) when the host has no usable `python3`: always on Unraid, as a fallback on Synology and CasaOS, and always on ZimaOS. Synology also runs all its write checks in it (as the app user PUID:PGID and as FileBrowser's uid 1000), so the Synology installer always needs the image (it pulls it once if missing), even when DSM's `python3` does the seeding. TrueNAS seeds with TrueNAS's own `python3` and needs no image.
 
 To bump it: pick a newer `python:3.X.Y-slim-trixie` tag, get its digest with `docker buildx imagetools inspect python:<tag>` (the top `Digest:` line, which covers every architecture; `docker pull` followed by `docker image inspect --format '{{index .RepoDigests 0}}'` gives the same value), replace `SEED_IMAGE` in all three installers, and run their test suites. Breaking signals: `seed_configs.py` must keep running on Python 3.8 (DSM 7's `python3`) as well as on the image's Python.
 
@@ -149,7 +149,7 @@ Each installer checks the platform version where it can, and was written against
 
 A host-side Python app, not a container, so no image to pin. Dependencies installed into a venv at `scripts/env-editor/.venv/` by `./scripts/setup.sh`, which rebuilds it whenever `requirements.txt` changes or an earlier build failed partway (it compares the file's sha256 with `.venv/.requirements.sha256`, written after a successful install). The native install builds the same venv from the hash-pinned `native/locks/env-editor.txt` instead.
 
-- **Python**: 3.9+ with the `venv` module (`python3-venv` on Debian/Ubuntu); any version on PATH, `scripts/setup.sh` auto-picks the newest `python3*` it finds.
+- **Python**: 3.9+ with the `venv` module (`python3-venv` on Debian/Ubuntu). `scripts/setup.sh` uses `$PYTHON` if set, else `python3` (whatever version it is), and only when there is no `python3` tries `python3.12`, `python3.11`, `python3.10` and `python3.9`, in that order. A host whose only Python is `python3.13` or newer without a `python3` link needs `PYTHON=python3.13 ./scripts/setup.sh`.
 - **PyPI deps**: `flask>=3.0`, `bcrypt>=4.0`, `requests>=2.31` (`scripts/env-editor/requirements.txt`). Not pinned in Docker mode: `setup.sh` installs whatever PyPI has that matches.
 - **qBittorrent search plugin**: `scripts/env-editor/seed_configs.py` downloads `jackett.py` from the commit pinned in `native/versions.env` (`QBIT_SEARCH_PLUGINS_COMMIT`) and refuses it unless its sha256 matches `QBIT_JACKETT_PLUGIN_SHA256`. It does so only when the plugin file is missing: delete `./configs/qbittorrent/qBittorrent/nova3/engines/jackett.py` to fetch it again after a pin bump.
 - **Breaking signals:** Jackett's `/api/v2.0/indexers/<id>/config` schema — the Indexers tab is schema-driven, so a Jackett API change there would show up as a form that no longer validates against Jackett when submitted.
@@ -157,10 +157,16 @@ A host-side Python app, not a container, so no image to pin. Dependencies instal
 
 ### GitHub Actions
 
-- **Pinned at:** inside `.github/workflows/*.yml`: `actions/checkout@v7` (`lint.yml`, `claude-breaking-review.yml`), `ludeeus/action-shellcheck@2.0.0` (`lint.yml`), `anthropics/claude-code-action@v1` (`claude-breaking-review.yml`). These are tags, not commit SHAs.
+- **Pinned at:** inside `.github/workflows/*.yml`: `actions/checkout@v7` (`lint.yml`, `claude-breaking-review.yml`, `installers.yml`), `ludeeus/action-shellcheck@2.0.0` (`lint.yml`), `anthropics/claude-code-action@v1` (`claude-breaking-review.yml`). These are tags, not commit SHAs.
 - **Source:** each action's own GitHub repo
 - **Breaking signals:** `v1` → `v2` major on `claude-code-action` is the one most likely to actually require changes (prompt / input renames). `action-shellcheck`'s `severity` and `scandir` inputs are what `lint.yml` uses.
 - **Auto-tracked:** yes, by Dependabot (`github-actions` ecosystem). Non-major bumps group on a Monday PR; majors land solo and get labelled `breaking-candidate` by `label-major-bumps.yml`.
+
+### CI-only Python package
+
+- **Pinned at:** `.github/workflows/installers.yml`, step "Python with PyYAML (pinned, in a venv)": `PyYAML==6.0.3` with `--require-hashes`, one `--hash=sha256:` per wheel it may use, the Linux x86-64 (manylinux) wheels for CPython 3.12, 3.13 and 3.14 (<https://pypi.org/project/PyYAML/6.0.3/#files>). The TrueNAS helper and the CasaOS schema check need it; nothing else in CI installs from PyPI.
+- **Auto-tracked:** no. Dependabot has no `pip` ecosystem here, and the pin sits in a heredoc, not in a requirements file it could read. Bump it by hand: new version, and the sha256 of each of those wheels from its PyPI files page.
+- **Breaking signals:** pip stops with a hash mismatch, or finds no matching wheel, when `ubuntu-latest` moves to a Python version the list has no wheel for. Add that wheel's hash.
 
 ## How to add a new image
 

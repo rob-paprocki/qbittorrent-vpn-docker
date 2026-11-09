@@ -13,7 +13,9 @@ CasaOS rendering makes on purpose:
   * with --no-ipv6-sysctl: gluetun's IPv6 sysctl, which install.sh leaves
     out on kernels booted with ipv6.disable=1;
   * `profiles` (a profiled service is rendered only when its profile is on)
-    and the empty `bind: {}` Compose adds to short-syntax volumes;
+    and the defaults Compose prints for the short syntax only: an empty
+    `bind: {}` (Compose 5), or `bind: {create_host_path: true}` and ports'
+    `mode: ingress` (Compose 2.x);
   * the revision label (io.github.rob-paprocki.torrent-stack.rev) on every
     service, which install.sh uses to see what CasaOS has applied;
   * `restart: true` on the depends_on of the apps behind Gluetun, while
@@ -90,10 +92,20 @@ def main() -> int:
     for doc in (casa, repo):
         for svc in doc["services"].values():
             for vol in svc.get("volumes") or []:
+                # Docker Compose 2.x prints the flag the short syntax
+                # (compose.yaml) implies; Compose 5 treats it as the default
+                # for both syntaxes and prints nothing.
+                if (vol.get("bind") or {}).get("create_host_path") is True:
+                    del vol["bind"]["create_host_path"]
                 # Short-syntax binds (compose.yaml) come out with an empty
                 # "bind" block; the long syntax (CasaOS) without one.
                 if vol.get("bind") == {}:
                     del vol["bind"]
+            for port in svc.get("ports") or []:
+                # "ingress" is the default mode. Compose 2.x prints it for
+                # the short syntax only.
+                if isinstance(port, dict) and port.get("mode") == "ingress":
+                    del port["mode"]
     if a.no_ipv6_sysctl:
         repo["services"]["gluetun"].pop("sysctls", None)
     for svc in casa["services"].values():
