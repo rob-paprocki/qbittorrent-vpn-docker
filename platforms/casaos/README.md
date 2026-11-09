@@ -31,7 +31,7 @@ The installer is one script, [`install.sh`](install.sh). It asks a few questions
    * **Time zone**: taken from the box.
    * **VPN provider** and **protocol**, then the **WireGuard private key** and **address** (or the OpenVPN username and password). Typed keys and passwords are hidden.
    * **Server countries**, for example `Netherlands,Switzerland`.
-   * **qBittorrent user and password**. Leave the password empty and one is generated and shown at the end.
+   * **qBittorrent user and password**. Leave the password empty and one is generated and shown at the end. FileBrowser's user `admin` gets the same password, so it must be 5 to 72 characters long and not `admin` (FileBrowser cannot take those; the installer says so).
    * **Discord webhook** (optional), for "port updated" messages.
    * **Web UI ports**: change them only if another app already uses one. These are the ports on the box; inside, Jackett and FlareSolverr keep their own ports (9117 and 8191), so changing them is safe.
    * **Automatic updates**: see [Updating](#updating). The default is no.
@@ -57,7 +57,8 @@ Re-running the one-liner is safe. It reuses your `.env` as the defaults and upda
 | Dashboard | One app, *Torrent Stack*. The icon opens qBittorrent. The other web UIs are on their own ports (table below). |
 | `/DATA/AppData/torrent-stack/` | This repository's files, plus the things below. CasaOS's convention is `/DATA/AppData/<app>`. |
 | `.../torrent-stack/.env` | **Every setting**, including the VPN key and passwords. Readable by root only (0600). |
-| `.../torrent-stack/configs/` | The apps' own settings (qBittorrent, Jackett, FlareSolverr, FileBrowser, Gluetun). |
+| `.../torrent-stack/configs/` | The apps' own settings (qBittorrent, Jackett, FlareSolverr, FileBrowser, Gluetun). They are kept by updates, `--apply` and `--uninstall`. |
+| `.../torrent-stack/configs/filebrowser/database.sqlite` | FileBrowser's users and settings. Kept when the container is recreated (an update, a port change). |
 | `.../torrent-stack/casaos-app.yml` | The app definition last sent to CasaOS (root only). Useful for a manual import. |
 | `/DATA/Downloads/` and `/DATA/Downloads/incomplete/` | Finished and in-progress downloads. FileBrowser shows this folder. |
 | `/var/lib/casaos/apps/torrent-stack/` | CasaOS's own copy of the app definition. CasaOS manages it; do not edit it. |
@@ -67,11 +68,13 @@ Re-running the one-liner is safe. It reuses your `.env` as the defaults and upda
 | qBittorrent (VueTorrent) | `http://<box>:8090` | the qBittorrent user and password from the wizard |
 | Jackett | `http://<box>:9117` | none |
 | FlareSolverr | `http://<box>:8191` | none (Jackett uses it) |
-| FileBrowser | `http://<box>:8081` | see [First login](#first-login) |
+| FileBrowser | `http://<box>:8081` | user `admin`, the qBittorrent password |
 
 Settings the installer makes for you:
 
-* `PUID`/`PGID` **1000/1000**. That is CasaOS's own default for apps. The config folders and the `incomplete` folder belong to it. An existing downloads folder keeps its owner (`/DATA/Downloads` is writable by everyone); the installer warns you if qBittorrent could not write there.
+* `PUID`/`PGID` **1000/1000**. That is CasaOS's own default for apps. The config folders and the `incomplete` folder belong to it.
+* FileBrowser's image always runs as uid 1000, whatever `PUID` is, so the stack also gives it the `PGID` group. The folders the installer makes for it (FileBrowser's config folder, the `incomplete` folder, and the downloads folder if it did not exist yet) are writable for that group, with the setgid bit (mode `2775`), so what FileBrowser and qBittorrent create there stays in the `PGID` group. With the default 1000/1000 this changes nothing you would notice.
+* An existing downloads folder keeps its owner and mode (`/DATA/Downloads` is writable by everyone). The installer warns you, with the command to fix it, if qBittorrent or FileBrowser could not write there.
 * Absolute `/DATA/...` paths in `.env`.
 * No Discord webhook unless you give one.
 * Watchtower off unless you turn on automatic updates.
@@ -80,11 +83,11 @@ Settings the installer makes for you:
 
 * **qBittorrent**: the user and password from the wizard. The installer already put the password into qBittorrent's settings, and checked that qBittorrent accepts it. It also installed the Jackett search plugin and wired it to Jackett's API key, so *Search* works as soon as you add indexers.
 * **Jackett**: open it and add indexers (*Add indexer*). FlareSolverr is already set as its Cloudflare solver.
-* **FileBrowser**: the current FileBrowser image ignores the login the installer prepares (see [Limitations](#limitations-and-known-issues)). It creates its own `admin` password on first start. The installer reads it from FileBrowser's log and prints it at the end (*FileBrowser login: user admin, first-run password ...*) when it runs in a terminal; otherwise it prints the command below. FileBrowser asks you to change it at first login. To see it again:
+* **FileBrowser**: user `admin`, and the qBittorrent password (`QBITTORRENT_PASSWORD` in `.env`). The user name is FileBrowser's own default and cannot be changed here. FileBrowser sets that password again every time it starts, so:
+  * when you change the qBittorrent password (edit `.env`, run `--apply`), FileBrowser's `admin` gets the new one too;
+  * a password you change inside FileBrowser for `admin` only lasts until FileBrowser next starts (an update, a restart of the app, a reboot). Change `QBITTORRENT_PASSWORD` instead.
 
-  ```bash
-  docker logs torrent-stack-filebrowser-1 2>&1 | grep -i "initial admin password"
-  ```
+  Everything else FileBrowser keeps, in `configs/filebrowser/database.sqlite`: other users you add, their passwords, shares and settings stay when the container is recreated.
 
 ## Adding the VPN settings later
 
@@ -111,7 +114,7 @@ bash /DATA/AppData/torrent-stack/platforms/casaos/install.sh --apply
 
 A few things it takes care of:
 
-* **qBittorrent's password.** qBittorrent 5 keeps its web UI login in a newer `[WebUI]` section of `qBittorrent.conf` once it has started the first time. The repository's seeding CLI writes the login there too in that case, so a changed password really reaches qBittorrent. If qBittorrent still refuses the login, `TS_RESEED=1 bash /DATA/AppData/torrent-stack/platforms/casaos/install.sh --apply` seeds it again.
+* **qBittorrent's password.** qBittorrent 5 keeps its web UI login in a newer `[WebUI]` section of `qBittorrent.conf` once it has started the first time. The repository's seeding CLI writes the login there too in that case, so a changed password really reaches qBittorrent. If qBittorrent still refuses the login, `TS_RESEED=1 bash /DATA/AppData/torrent-stack/platforms/casaos/install.sh --apply` seeds it again. FileBrowser's `admin` gets the new password as well (CasaOS recreates FileBrowser with it). A password FileBrowser cannot take (shorter than 5 characters, longer than 72 bytes, or `admin`) is refused before anything changes.
 * **Each setting once.** If `.env` sets something twice (for example a new password added at the end instead of changing the existing line), `--apply` refuses and names both line numbers. Docker would quietly use the last one, and qBittorrent and Gluetun could end up with different passwords. Re-running the installer's wizard keeps one line.
 * **Ports.** `JACKETT_PORT` and `FLARESOLVERR_PORT` choose the port on the box. Inside Gluetun's network Jackett stays on 9117 and FlareSolverr on 8191, so the search plugin and Jackett's FlareSolverr link keep working. `QBIT_WEBUI_PORT` is the same inside and out, so it must not be 9117, 8191, 8000 or 9999 (used inside by Jackett, FlareSolverr and Gluetun).
 
@@ -231,11 +234,10 @@ The installer turns `.env` plus the repository's `compose.yaml` into a CasaOS ap
 2. **Every path is absolute.** CasaOS reads the definition in a temporary folder, so `./update-qbittorrent.sh` would point nowhere.
 3. **`x-casaos` metadata.** The app's id (`io.github.rob-paprocki.torrent-stack`), title, icon (embedded, nothing is fetched from a CDN), category, and the port the icon opens. Each service also carries short descriptions shown in CasaOS's settings dialog.
 
-Three more differences fix problems the repository's `compose.yaml` still has (they are reported for a change there):
+Two more differences:
 
-4. **Jackett and FlareSolverr keep their own ports inside** (`JACKETT_PORT:9117`, `FLARESOLVERR_PORT:8191`). With `compose.yaml`'s `JACKETT_PORT:JACKETT_PORT`, a changed port points at nothing.
-5. **`restart: true`** on the dependency of qBittorrent, Jackett and FlareSolverr on Gluetun, so a restart of the app restarts them after Gluetun.
-6. **A revision label on every container**, a short hash of that service's definition (for Gluetun, also of `update-qbittorrent.sh`). CasaOS applies changes in the background and, when that fails, keeps the old definition without reporting it, so the installer compares these labels with what it sent to know when CasaOS has really switched. It also means a new `update-qbittorrent.sh` recreates Gluetun: Docker keeps the old file mounted until then.
+4. **`restart: true`** on the dependency of qBittorrent, Jackett and FlareSolverr on Gluetun, so a restart of the app restarts them after Gluetun. (`compose.yaml` does not have it yet; it is reported for a change there.)
+5. **A revision label on every container**, a short hash of that service's definition (for Gluetun, also of `update-qbittorrent.sh`). CasaOS applies changes in the background and, when that fails, keeps the old definition without reporting it, so the installer compares these labels with what it sent to know when CasaOS has really switched. It also means a new `update-qbittorrent.sh` recreates Gluetun: Docker keeps the old file mounted until then.
 
 It then talks to CasaOS's **app-management API** on `127.0.0.1`. app-management accepts local calls without a login; that is how `casaos-cli` works. The address comes from `/var/run/casaos/app-management.url`, or else from the gateway port in `/etc/casaos/gateway.ini`. The calls are:
 
@@ -245,20 +247,23 @@ It then talks to CasaOS's **app-management API** on `127.0.0.1`. app-management 
 
 The images are pulled before CasaOS is called, so download progress and registry errors show in the terminal.
 
-First-run seeding uses this repository's seeding CLI (`scripts/env-editor/seed_configs.py`): the qBittorrent password and the Jackett search plugin (the commit and checksum pinned in `native/versions.env`; a download that does not match is refused), pointed at Jackett's own port 9117, and the Jackett API key. FileBrowser's login is not seeded (the current image ignores it, see Limitations), so nothing needs `bcrypt` and nothing is installed from PyPI. It runs on the box's `python3` (3.8 or later); otherwise in a throwaway `python:3.14.9-slim-trixie` container pinned by digest, with the stack folder mounted read-only and only the configs folder writable (always on ZimaOS, which ships no python3 as far as we know). Either way it reads `.env` as root, then switches to the apps' user (`PUID:PGID`) before it writes anything, so a link planted in an app's config folder can never make root overwrite another file. qBittorrent is stopped while it is seeded, because it writes its settings back when it stops. Seeding is skipped when the login has not changed. It needs internet access once, for the search plugin.
+Everything else is as in `compose.yaml`, which the test suite checks: Jackett and FlareSolverr are published as `JACKETT_PORT:9117` and `FLARESOLVERR_PORT:8191`, and FileBrowser keeps its database in its config folder (`FILEBROWSER_DATABASE_PATH=/config/database.sqlite`), gets the qBittorrent password for `admin` (`FILEBROWSER_ADMIN_PASSWORD`) and the `PGID` group (`group_add`).
+
+First-run seeding uses this repository's seeding CLI (`scripts/env-editor/seed_configs.py`): the qBittorrent password and the Jackett search plugin (the commit and checksum pinned in `native/versions.env`; a download that does not match is refused), pointed at `127.0.0.1:9117` (Jackett's own port inside Gluetun's network, whatever `JACKETT_PORT` is on the box), and the Jackett API key. FileBrowser needs no seeding (`compose.yaml` sets its password), so nothing needs `bcrypt` and nothing is installed from PyPI. It runs on the box's `python3` (3.8 or later); otherwise in a throwaway `python:3.14.9-slim-trixie` container pinned by digest, with the stack folder mounted read-only and only the configs folder writable (always on ZimaOS, which ships no python3 as far as we know). Either way it reads `.env` as root, then switches to the apps' user (`PUID:PGID`) before it writes anything, so a link planted in an app's config folder can never make root overwrite another file. qBittorrent is stopped while it is seeded, because it writes its settings back when it stops. Seeding is skipped when the login has not changed. It needs internet access once, for the search plugin.
 
 ## ZimaOS
 
 ZimaOS grew out of CasaOS and keeps its app system. Its services are called `zimaos-app-management` and so on, but it keeps CasaOS's paths (`/DATA/AppData`, `/var/lib/casaos`, `/etc/casaos`) and the same Import dialog. The installer detects ZimaOS (`zimaos -v` or `/etc/os-release`) and handles its differences:
 
 * the root filesystem is read-only, so everything goes to `/DATA` and nothing is installed into the system;
-* ZimaOS does not seem to ship python3, git or whiptail (we could not check a real one). The installer needs none of them: it seeds in the throwaway container, downloads the repository as a tarball with curl, and asks plain prompts. If its `tar` is busybox's, that works too (the installer only uses options both understand).
+* ZimaOS does not seem to ship python3, git or whiptail (we could not check a real one). The installer needs none of them: it seeds in the throwaway container, downloads the repository as a tarball with curl, and asks plain prompts. If its `tar` is busybox's, that works too, as long as that busybox was built with `tar --exclude` (the installer only uses options both understand). Buildroot's default busybox has it, and ZimaOS is built with Buildroot; Ubuntu's `busybox-static` 1.36.1 does not, and `--update` then stops while copying the files.
 
 **ZimaOS was not tested on a real ZimaOS machine** (only with a `zimaos -v` stand-in). If its app-management asks for a login (the installer would say "asked for a login"), use [Install by hand](#install-by-hand-import).
 
 ## Limitations and known issues
 
-* **FileBrowser login and data.** The current `gtsteffaniak/filebrowser:stable` image reads its settings and database from `/home/filebrowser/data` (its `FILEBROWSER_CONFIG` variable), not from the `/config` folder that the repository's `compose.yaml` mounts. It also no longer accepts the format the seeding CLI writes there. So FileBrowser makes its own first-run password (shown by the installer when it runs in a terminal, see [First login](#first-login)). Its users and settings live inside the container and are reset when the container is recreated (an update, a port change). This affects every Docker platform of this repository, not just CasaOS; it is reported for a fix in `compose.yaml` and the seeding CLI.
+* **FileBrowser's `admin` password is always the qBittorrent one.** FileBrowser sets it again on every start, so changing it inside FileBrowser does not last (see [First login](#first-login)).
+* **FileBrowser with a `PUID` other than 1000.** FileBrowser always runs as uid 1000 and reaches the downloads through the `PGID` group. It can see everything there, but it may not be able to delete or rename inside folders qBittorrent creates, because qBittorrent does not make them group-writable unless its `UMASK` setting says so (`compose.yaml` does not set one). With CasaOS's default `PUID` 1000 both apps are the same user and this does not come up.
 * **Secrets are visible to CasaOS admins.** CasaOS keeps the app's settings, VPN key included, in its own copy of the app and shows them in the app's settings dialog to anyone who can log in to the dashboard. CasaOS's *Files* app can also open `/DATA/AppData/torrent-stack/.env`.
 * **No `$` in values** (see [Changing settings](#changing-settings)).
 * **One dashboard icon.** CasaOS gives an app one icon, which opens qBittorrent. Jackett, FlareSolverr and FileBrowser are on their ports.
@@ -269,22 +274,24 @@ ZimaOS grew out of CasaOS and keeps its app system. Its services are called `zim
 
 ## What was tested, and what was not
 
-**Tested on a real CasaOS**: v0.4.15, installed with the official `get.casaos.io` script in a Debian 13 Incus container with Docker 26.1. Its app-management package is v0.4.10-alpha2, which reports itself as v0.4.5. Automated in [`tests/e2e-incus.sh`](tests/e2e-incus.sh) (41 checks, all passing) unless marked "by hand":
+**Tested on a real CasaOS**: v0.4.15, installed with the official `get.casaos.io` script in a Debian 13 Incus container with Docker 26.1. Its app-management package is v0.4.10-alpha2, which reports itself as v0.4.5. Automated in [`tests/e2e-incus.sh`](tests/e2e-incus.sh) (51 checks, all passing) unless marked "by hand":
 
 * A fresh install is accepted by app-management. It shows on the dashboard's app grid with its title, port and icon. qBittorrent, Jackett and FlareSolverr run in Gluetun's network namespace. CasaOS accepts the `restart: true` dependencies and the revision labels and keeps them on the containers.
 * With a made-up WireGuard key, Gluetun runs but never gets healthy, so qBittorrent, Jackett and FlareSolverr are never started. A container in Gluetun's network cannot reach the internet, by IP or by name.
+* CasaOS's `/DATA/Downloads` is writable for qBittorrent and FileBrowser (no warning), and the `incomplete` folder is made `1000:1000`, mode `2775`.
 * A re-run and `--apply` update the app in place (PUT) without recreating containers. `--dry-run` changes no file and prints no secret. `--print-yaml` is clean YAML. `--uninstall` removes the app, waits until CasaOS has deleted its own copy too, and keeps `/DATA/AppData/torrent-stack`.
-* With Gluetun swapped for an always-healthy test double, every app started under CasaOS and the installer's own checks (shared network, every web UI, qBittorrent login) passed. From another machine on the network: qBittorrent accepted the seeded password (and refused a wrong one), had the Jackett search plugin installed, and used the seeded save paths. Jackett accepted the seeded API key, FlareSolverr answered, and FileBrowser accepted the first-run password from its log. No password was printed into the installer's log file.
-* **A password change with `--apply`**: the new password logs in from the network, the old one is refused, and Gluetun's port-forward script has the new one.
+* With Gluetun swapped for an always-healthy test double, every app started under CasaOS and the installer's own checks (shared network, every web UI, qBittorrent login) passed. From another machine on the network: qBittorrent accepted the seeded password (and refused a wrong one), had the Jackett search plugin installed, and used the seeded save paths. Jackett accepted the seeded API key and FlareSolverr answered. FileBrowser accepted `admin` with the qBittorrent password and refused a wrong one; its database is in `configs/filebrowser` (folder `1000:1000`, mode `2775`), and CasaOS kept `group_add` on the container. No password was printed into the installer's log file.
+* **A password change with `--apply`**: the new password logs in from the network, the old one is refused, and Gluetun's port-forward script has the new one. FileBrowser too takes the new password and refuses the old one, and it kept its database across the recreate (the same `admin` user id).
 * **`JACKETT_PORT=9118`, `FLARESOLVERR_PORT=8192`**: both answer on the new ports from the network, and the search plugin still reaches Jackett inside.
 * **Restarting the whole app through CasaOS** (the call the dashboard's Restart button makes): afterwards all four containers share Gluetun's new network and qBittorrent answers.
 * **Gluetun restarted on its own** (`docker restart`): the web UIs went dead as described; `--apply` noticed, restarted the three apps into Gluetun's network, and qBittorrent answered again.
 * By hand: a port already in use is refused with the port named, against CasaOS's own port check (during the first build). A change CasaOS could not apply in the background (its backup copy made to fail; CasaOS's log said `docker-compose.yml.bak: is a directory`): the containers kept the old settings and `--apply` exited 1 saying so, instead of reporting success. A failed image pull stopped `--apply` before anything was changed. The installed app's folder is read correctly from the YAML CasaOS returns.
 * Seeding on the box's own python3.
+* By hand, the real FileBrowser Quantum v2.0.2 image on plain Docker, with folders as the installer makes them for `PUID` 1001 / `PGID` 1002 and the same settings as `compose.yaml`: the database went to `/config`, `admin` with the given password logged in (a wrong one got 401), and after a restart with a new password the new one worked, the old one was refused and the `admin` user was the same. With the folder only handed to `PUID` (what the installer did before), FileBrowser could no longer write its database ("attempt to write a readonly database") and its password change failed.
 
 The qBittorrent `[WebUI]` fix was also checked against the real `lscr.io/linuxserver/qbittorrent` image (qBittorrent 5.3.0) directly: re-seeding only the old keys left the old password working (401 for the new one); after the installer's copy into `[WebUI]` the new password worked (204) and the old one was refused.
 
-**Tested with stand-ins** ([`tests/run-tests.sh`](tests/run-tests.sh), 149 checks, all passing): a fake app-management built from CasaOS-AppManagement's source and checked against the real one; shims for `docker`, `casaos -v` and `zimaos -v`; whiptail; a pseudo-terminal for the plain prompts; and stand-ins for what the apps do (qBittorrent 5's settings migration and login, which port answers inside Gluetun's network, network namespaces). The rendered app passes `docker compose config -q`, schema checks taken from CasaOS-AppStore and app-management, and **IceWhaleTech's own AppStore validator** (`validate_compose.py`). A drift check compares it with `compose.yaml` through `docker compose config`, with Watchtower off and on and the IPv6 sysctl on and off; it allows only the differences listed in [How it works](#how-it-works). Also covered: every refusal (not CasaOS, too old, no terminal, a login required, ports in use, someone else's app or containers, a `$` in a value, a key set twice in `.env`, a downloads folder that is a whole disk, a top-level folder, contains the stack or has the app name in it, a qBittorrent port taken inside Gluetun's network), that a refusal by CasaOS's validation happens before qBittorrent is stopped or seeded, startup gating, `--no-register`, `--update` with a new image, `--update` with no git (tarball download) and busybox 1.37's `tar`, remembering the tag and fork, applying with the new installer, a new `update-qbittorrent.sh` recreating Gluetun, a password change, host-side port changes, a dead web UI and a refused login (exit 3), `TS_RESEED`, apps left outside Gluetun's network, a change CasaOS does not apply, finding the stack without `TS_APPDATA`, keeping an absolute `CONFIG_PATH`, the not-connected report, both wizards, `--uninstall --purge`, seeding in the container and on the host, and that no secret ends up on a `docker` or `curl` command line or in the output. Each of the new checks was confirmed to fail with its fix taken out.
+**Tested with stand-ins** ([`tests/run-tests.sh`](tests/run-tests.sh), 174 checks with IceWhaleTech's validator, all passing; one more is skipped without a busybox): a fake app-management built from CasaOS-AppManagement's source and checked against the real one; shims for `docker`, `casaos -v` and `zimaos -v`; whiptail; a pseudo-terminal for the plain prompts; and stand-ins for what the apps do (qBittorrent 5's settings migration and login, which port answers inside Gluetun's network, network namespaces). The rendered app passes `docker compose config -q`, schema checks taken from CasaOS-AppStore and app-management, and **IceWhaleTech's own AppStore validator** (`validate_compose.py`). A drift check compares it with `compose.yaml` through `docker compose config`, with Watchtower off and on, the IPv6 sysctl on and off, Jackett and FlareSolverr on other host ports, and `PUID`/`PGID` 1001/1002; it allows only the differences listed in [How it works](#how-it-works). FileBrowser's part (database path, the qBittorrent password for `admin`, `PGID` as extra group) is checked on its own too, as are the folder modes, and with the kernel's own permission checks (`setpriv`) that uid 1000 with the `PGID` group can write FileBrowser's database and the downloads, and cannot without that group. Also covered: every refusal (not CasaOS, too old, no terminal, a login required, ports in use, someone else's app or containers, a `$` in a value, a key set twice in `.env`, a downloads folder that is a whole disk, a top-level folder, contains the stack or has the app name in it, a qBittorrent port taken inside Gluetun's network, a qBittorrent password FileBrowser cannot take), that a refusal by CasaOS's validation happens before qBittorrent is stopped or seeded, startup gating, `--no-register`, `--update` with a new image, `--update` with no git (tarball download), and busybox 1.37's `tar` (in an earlier round; this round only Ubuntu's `busybox-static` 1.36.1 was at hand, which has no `tar --exclude`, see [ZimaOS](#zimaos)), remembering the tag and fork, applying with the new installer, a new `update-qbittorrent.sh` recreating Gluetun, a password change, host-side port changes, a dead web UI and a refused login (exit 3), `TS_RESEED`, apps left outside Gluetun's network, a change CasaOS does not apply, finding the stack without `TS_APPDATA`, keeping an absolute `CONFIG_PATH`, the not-connected report, both wizards, `--uninstall --purge`, seeding in the container and on the host, and that no secret ends up on a `docker` or `curl` command line or in the output. Each of the new checks was confirmed to fail with its fix taken out (for the FileBrowser and folder checks: against the previous `install.sh`).
 
 **Not tested:**
 
@@ -294,6 +301,7 @@ The qBittorrent `[WebUI]` fix was also checked against the real `lscr.io/linuxse
 * Clicking through the dashboard itself (the Import dialog, the settings dialog, the Restart button); its code was read, and Restart was tested through the same API call.
 * The nightly cron line on a real box.
 * The seeding container against real pypi from inside nested Docker (this test machine intercepts TLS, which the throwaway python container does not trust). The same container command is exercised by the Unraid installer's tests.
+* FileBrowser with a `PUID` other than 1000 under CasaOS itself (only the real image on plain Docker, and the permission checks in the shim tests), and deleting qBittorrent's downloads from FileBrowser in that case (see [Limitations](#limitations-and-known-issues)).
 * The VueTorrent theme. Its docker mod is downloaded from ghcr.io inside the qBittorrent container, which hit the same TLS limit here.
 * Real Gluetun with the IPv6 sysctl (the test kernel has `ipv6.disable=1`).
 
@@ -327,7 +335,14 @@ bash platforms/casaos/tests/e2e-incus.sh
 * ZimaOS service names (`zimaos-app-management`, `zimaos -v`; third-party cheat sheet): <https://computingforgeeks.com/casaos-zimaos-cli-cheat-sheet/>
 * Gluetun with another app on ZimaOS (community): <https://shop.zimaspace.com/pages/zimaos-vpn-client-gluetun-app-routing>
 * Gluetun port forwarding: <https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/vpn-port-forwarding.md>
-* FileBrowser (gtsteffaniak) configuration: <https://github.com/gtsteffaniak/filebrowser>
+* FileBrowser Quantum (gtsteffaniak), v2.0.2-stable, the version `:stable` was when this was tested:
+  * environment variables (`FILEBROWSER_ADMIN_PASSWORD`, `FILEBROWSER_DATABASE_PATH`): <https://filebrowserquantum.com/en/docs/reference/environment-variables/>
+  * `FILEBROWSER_ADMIN_PASSWORD` read on every start, default user `admin`, minimum length 5: <https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/config.go>, <https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/password_policy.go>
+  * the `admin` user's password set from it at every start, unless it is empty or `admin`: <https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/cmd/user.go>, <https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/auth.go>, first start: <https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/state/bootstrap_admin_password.go>
+  * the image runs as uid 1000: <https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/_docker/Dockerfile>
+  * bcrypt takes at most 72 bytes (golang.org/x/crypto v0.57.0, which it uses): <https://github.com/golang/crypto/blob/v0.57.0/bcrypt/bcrypt.go>
+* `group_add` in the Compose that CasaOS's app-management builds on (compose-go v1.20.2, docker compose v2.23.3): <https://github.com/compose-spec/compose-go/blob/v1.20.2/types/types.go>, <https://github.com/docker/compose/blob/v2.23.3/pkg/compose/create.go>; versions from <https://github.com/IceWhaleTech/CasaOS-AppManagement/blob/v0.4.10-alpha2/go.mod>
+* Buildroot's default busybox (`tar --exclude` is `CONFIG_FEATURE_TAR_FROM`): <https://github.com/buildroot/buildroot/blob/master/package/busybox/busybox.config>
 * Compose file reference: <https://docs.docker.com/reference/compose-file/> (`depends_on` with `restart: true`: <https://docs.docker.com/reference/compose-file/services/#depends_on>)
 * How CasaOS's Compose restarts an app (only `restart: true` dependencies keep their order): <https://github.com/docker/compose/blob/v2.23.3/pkg/compose/restart.go>, and the dependency label it reads back: <https://github.com/docker/compose/blob/v2.23.3/pkg/compose/compose.go>
 * qBittorrent's move of the web UI settings to `[WebUI]` (migration 11): <https://github.com/qbittorrent/qBittorrent/blob/master/src/app/upgrade.cpp>

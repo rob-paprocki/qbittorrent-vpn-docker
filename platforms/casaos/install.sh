@@ -62,7 +62,7 @@ readonly STACK="torrent-stack"
 readonly APP_ID="io.github.rob-paprocki.torrent-stack"
 # Version of the CasaOS rendering below. Bump it when the rendered compose
 # changes shape; it is shown as the app version on the dashboard.
-readonly RENDER_VERSION="1.0.0"
+readonly RENDER_VERSION="1.1.0"
 
 # Whether these were given on this run. When they were not, --update reuses
 # the branch/tag and fork the stack was installed from (kept in
@@ -90,9 +90,11 @@ readonly MIN_CASAOS="0.4.4"
 # python3 cannot run it. Pinned by tag and by digest (the digest is what
 # docker actually pulls), bumped by hand; the same image as Unraid's.
 readonly SEED_IMAGE="python:3.14.9-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8"
-# The seeders to run. FileBrowser's is left out: the current FileBrowser
-# image never reads the file it writes (README, Limitations), and it is the
-# only one that needs bcrypt. So nothing is pip-installed anywhere.
+# The seeders to run. FileBrowser's is left out: compose.yaml sets its
+# "admin" password on every start (FILEBROWSER_ADMIN_PASSWORD, from
+# QBITTORRENT_PASSWORD), and the current image never reads the file that
+# seeder writes. It is also the only one that needs bcrypt, so nothing is
+# pip-installed anywhere.
 readonly SEEDERS="jackett,qbit"
 
 # CasaOS's own defaults for $PUID/$PGID in AppStore apps are 1000/1000.
@@ -130,10 +132,16 @@ readonly ICON_DATA_URI="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy
 # Ports the apps listen on INSIDE Gluetun's network. Jackett listens on the
 # Port in its ServerConfig.json (seeded as 9117) and FlareSolverr on its PORT
 # variable (default 8191), so JACKETT_PORT and FLARESOLVERR_PORT in .env only
-# choose the port on the host side. qBittorrent is different: its WEBUI_PORT
+# choose the port on the host side (compose.yaml publishes JACKETT_PORT:9117
+# and FLARESOLVERR_PORT:8191). qBittorrent is different: its WEBUI_PORT
 # follows QBIT_WEBUI_PORT, so that port is the same inside and outside.
 readonly JACKETT_INTERNAL_PORT=9117
 readonly FLARESOLVERR_INTERNAL_PORT=8191
+# The FileBrowser image always runs as uid 1000 (its Dockerfile: adduser -u
+# 1000, USER filebrowser), whatever PUID is. compose.yaml adds the PGID group
+# (group_add), so it reaches the downloads and its config folder through
+# that group.
+readonly FILEBROWSER_UID=1000
 
 # Label on every container: a hash of that service's definition (for
 # Gluetun, also of update-qbittorrent.sh). It tells, from `docker ps`, which
@@ -920,9 +928,10 @@ check_path() {
 }
 
 # check_downloads_path LABEL PATH [CONFIG_PATH]: the downloads folder is
-# shared on the LAN by FileBrowser (which runs as uid 1000, like the apps),
-# so it must not contain the stack folder, the configs or other apps' data:
-# from there FileBrowser could read Jackett's API key and change
+# shared on the LAN by FileBrowser (which runs as uid 1000 with the PGID
+# group, so it can change what the apps can), so it must not contain the
+# stack folder, the configs or other apps' data: from there FileBrowser
+# could read Jackett's API key and change
 # qBittorrent's search plugin, which qBittorrent runs. It also must not be a
 # whole disk or a top-level folder such as /DATA, and must not contain the
 # app's name (CasaOS's "delete app data" uninstall would delete it).
@@ -1175,7 +1184,7 @@ wizard() {
     fi
     ui_input countries "Server countries" "Comma-separated VPN exit countries, for example: Switzerland,Netherlands" "$countries"
 
-    ui_input quser "qBittorrent user" "Login for qBittorrent's web UI. FileBrowser uses the same login." "$quser"
+    ui_input quser "qBittorrent user" "Login for qBittorrent's web UI. (FileBrowser's user is always 'admin', with the same password.)" "$quser"
     tmp=""
     ui_password tmp "qBittorrent password" \
       "$([[ -n "$qpass" ]] && echo 'Leave empty to keep the current password.' || echo 'Leave empty to generate one (shown at the end).')"
@@ -1225,6 +1234,9 @@ wizard() {
     valid_port "$p" || die "'${p}' is not a valid port (1-65535)."
   done
   [[ "$vtype" == wireguard || "$vtype" == openvpn ]] || die "VPN type must be wireguard or openvpn, not '${vtype}'."
+  local why
+  why=$(filebrowser_password_problem "$qpass")
+  [[ -z "$why" ]] || die "The qBittorrent password is also FileBrowser's admin password, and ${why}. Please choose another."
   if [[ -n "$wg_key" ]] && ! valid_wg_key "$wg_key"; then
     die "The WireGuard private key is not a valid key (44 characters ending in '=')."
   fi
@@ -1310,6 +1322,28 @@ check_inline_values() {
   if is_placeholder QBITTORRENT_USER "${E[QBITTORRENT_USER]}" || is_placeholder QBITTORRENT_PASSWORD "${E[QBITTORRENT_PASSWORD]}"; then
     die "QBITTORRENT_USER/QBITTORRENT_PASSWORD in ${ENV_FILE} are still placeholders. Set them, then run --apply again."
   fi
+  local why
+  why=$(filebrowser_password_problem "${E[QBITTORRENT_PASSWORD]}")
+  [[ -z "$why" ]] || die "QBITTORRENT_PASSWORD in ${ENV_FILE} is also FileBrowser's admin password, and ${why}. Please choose another, then run --apply again."
+}
+
+# filebrowser_password_problem PASSWORD: compose.yaml gives FileBrowser's
+# "admin" user the qBittorrent password (FILEBROWSER_ADMIN_PASSWORD), set
+# again on every start. FileBrowser Quantum 2.0 ignores the value "admin"
+# (it then makes up a password of its own), refuses fewer than 5 characters
+# when it sets the password on a later start, and its bcrypt hash cannot
+# take more than 72 bytes. Prints why PASSWORD would not work, or nothing.
+filebrowser_password_problem() {
+  local n
+  n=$(printf '%s' "$1" | wc -c)
+  if [[ "$1" == admin ]]; then
+    echo "FileBrowser ignores the password 'admin' (it would make up one of its own)"
+  elif ((n < 5)); then
+    echo "FileBrowser needs at least 5 characters"
+  elif ((n > 72)); then
+    echo "FileBrowser takes at most 72 bytes (letters outside A-Z can take 2-4 bytes each)"
+  fi
+  return 0
 }
 
 # check_duplicate_keys FILE: refuse a .env that sets one of the stack's keys
@@ -1414,14 +1448,12 @@ ipv6_sysctl_block() {
 #   2. every path is absolute: CasaOS loads the YAML in a temporary folder,
 #      so ./update-qbittorrent.sh would point nowhere;
 #   3. x-casaos metadata: one dashboard app, opened on qBittorrent's port.
-# Three more differences fix problems compose.yaml has too (reported for a
-# change there; the test suite's drift check allows exactly these):
-#   4. JACKETT_PORT and FLARESOLVERR_PORT only change the host port; inside,
-#      Jackett and FlareSolverr keep their own ports (9117, 8191);
-#   5. `restart: true` on depends_on: when the app is restarted, Compose
+# Two more differences (the test suite's drift check allows exactly these):
+#   4. `restart: true` on depends_on: when the app is restarted, Compose
 #      restarts Gluetun first and then the apps behind it, so they join its
-#      new network instead of keeping the dead one of the old Gluetun;
-#   6. a revision label on each service (see REV_LABEL and finalize_rendering).
+#      new network instead of keeping the dead one of the old Gluetun
+#      (reported for a change in compose.yaml too);
+#   5. a revision label on each service (see REV_LABEL and finalize_rendering).
 # Watchtower is included only when COMPOSE_PROFILES turns it on.
 render_compose() {
   local out=$1 c=${E[CONFIG_PATH]} qp=${E[QBIT_WEBUI_PORT]} jp=${E[JACKETT_PORT]}
@@ -1581,11 +1613,18 @@ $(bind_entry "${c}/jackett" /config)
       volumes:
 $(xvol /config "Jackett settings and indexers")
 
-  # Web file manager, scoped to the downloads folder only.
+  # Web file manager, scoped to the downloads folder only. Its database
+  # lives in its config folder, and its "admin" user gets the qBittorrent
+  # password on every start. The image always runs as uid 1000; the PGID
+  # group gives it the stack's access to the downloads and that folder.
   filebrowser:
     image: $(q "$(compose_image filebrowser)")
     environment:
       TZ: $(v TZ)
+      FILEBROWSER_DATABASE_PATH: /config/database.sqlite
+      FILEBROWSER_ADMIN_PASSWORD: $(v QBITTORRENT_PASSWORD)
+    group_add:
+      - $(v PGID)
     ports:
 $(port_entry 80 "$bp")
     volumes:
@@ -1596,10 +1635,13 @@ $(bind_entry "${E[DOWNLOADS_PATH]}" /srv/downloads)
       com.centurylinklabs.watchtower.scope: ${STACK}
       ${REV_LABEL}: '@REV@'
     x-casaos:
+      envs:
+$(xenv FILEBROWSER_ADMIN_PASSWORD "Password of FileBrowser's admin user (QBITTORRENT_PASSWORD in .env)")
+$(xenv FILEBROWSER_DATABASE_PATH "FileBrowser's database, kept in its config folder")
       ports:
 $(xport 80 "FileBrowser web UI")
       volumes:
-$(xvol /config "FileBrowser settings")
+$(xvol /config "FileBrowser's database (users and settings)")
 $(xvol /srv/downloads "The downloads folder")
 EOF
     if watchtower_on; then
@@ -1800,35 +1842,70 @@ prepare_folders() {
   msg_ok "Folders ready under ${STACK_DIR} and ${E[DOWNLOADS_PATH]}"
 }
 
-# prepare_downloads: create the download folders owned by PUID:PGID. A
-# folder that already exists (CasaOS's /DATA/Downloads share is 0777 root)
-# keeps its owner; nothing inside it is touched.
+# prepare_downloads: the download folders. qBittorrent writes there as
+# PUID:PGID; FileBrowser as uid 1000 with PGID as an extra group. A folder
+# the installer makes (or its own 'incomplete' folder, when an app could not
+# write there) gets PUID:PGID and mode 2775: group-writable, and the setgid
+# bit keeps what is created inside in the PGID group. A downloads folder
+# that already exists (CasaOS's /DATA/Downloads share is 0777 root) keeps
+# its owner and mode, with a warning when an app could not write there.
+# Nothing inside either folder is touched.
 prepare_downloads() {
-  local d u=${E[PUID]} g=${E[PGID]} owner mode
+  local d u=${E[PUID]} g=${E[PGID]}
   for d in "${E[DOWNLOADS_PATH]}" "${E[INCOMPLETE_DOWNLOADS]}"; do
     if [[ ! -d "$d" ]]; then
       run mkdir -p "$d"
-      run chown "${u}:${g}" "$d"
+      share_with_group "$d"
       continue
     fi
-    read -r owner mode < <(stat -c '%u %a' "$d")
-    # qBittorrent (uid u) can write if it owns the folder or "others" may write.
-    if [[ "$owner" != "$u" && $((8#$mode & 2)) == 0 ]]; then
-      if [[ "$d" == "${E[INCOMPLETE_DOWNLOADS]}" ]]; then
-        run chown "${u}:${g}" "$d"
-      else
-        msg_warn "${d} belongs to uid ${owner} (mode ${mode}); qBittorrent runs as ${u} and may not be able to write there. Fix: chown ${u}:${g} ${d}"
-      fi
+    if writable_by "$u" "$d" "$g" && writable_by "$FILEBROWSER_UID" "$d" "$g" "$FILEBROWSER_UID"; then
+      continue
+    fi
+    if [[ "$d" == "${E[INCOMPLETE_DOWNLOADS]}" ]]; then
+      share_with_group "$d"
+    else
+      msg_warn "${d} belongs to $(stat -c 'uid %u, group %g (mode %a)' "$d"); qBittorrent (uid ${u}) or FileBrowser (uid ${FILEBROWSER_UID}, group ${g}) may not be able to write there. Fix: chown ${u}:${g} ${d} && chmod 2775 ${d}"
     fi
   done
 }
 
+# share_with_group DIR: PUID:PGID, mode 2775 (see prepare_downloads).
+share_with_group() {
+  run chown "${E[PUID]}:${E[PGID]}" "$1"
+  run chmod 2775 "$1"
+}
+
+# writable_by UID DIR GID...: can a process running as UID, with the groups
+# GID..., create files in DIR? Like the kernel, only the owner bits count
+# for the owner and only the group bits for the group. (ACLs are not read.)
+writable_by() {
+  local uid=$1 dir=$2 owner group mode gid
+  shift 2
+  read -r owner group mode < <(stat -c '%u %g %a' "$dir")
+  mode=$((8#$mode))
+  [[ "$uid" == 0 ]] && return 0
+  [[ "$uid" == "$owner" ]] && { (((mode & 8#300) == 8#300)); return; }
+  for gid in "$@"; do
+    [[ "$gid" == "$group" ]] && { (((mode & 8#030) == 8#030)); return; }
+  done
+  (((mode & 8#003) == 8#003))
+}
+
 fix_ownership() {
-  local d c=${E[CONFIG_PATH]} u=${E[PUID]} g=${E[PGID]}
+  local d c=${E[CONFIG_PATH]} u=${E[PUID]} g=${E[PGID]} fb="${E[CONFIG_PATH]}/filebrowser"
+  # FileBrowser runs as uid 1000 (not PUID), with PGID as an extra group. It
+  # keeps database.sqlite (and SQLite's -wal/-shm files) in its folder, so
+  # the folder and those files must be group-writable, or it can no longer
+  # save anything once they belong to PUID (when PUID is not 1000). The
+  # setgid bit keeps the files it creates there in the PGID group. Group
+  # write comes first, so the running FileBrowser never sees its database
+  # read-only in between. (chmod -R does not follow links it finds inside.)
+  [[ -d "$fb" || "$DRY_RUN" == 1 ]] && run chmod -R g+rwX "$fb"
   # Gluetun runs as root and keeps its own folder.
   for d in qbittorrent jackett flaresolverr filebrowser; do
     [[ -d "${c}/${d}" || "$DRY_RUN" == 1 ]] && run chown -R "${u}:${g}" "${c}/${d}"
   done
+  [[ -d "$fb" || "$DRY_RUN" == 1 ]] && run chmod g+s "$fb"
   return 0
 }
 
@@ -1850,8 +1927,9 @@ pull_images() {
 }
 
 # ---------------------------------------------------------------------------
-# Seeding (qBittorrent password + Jackett search plugin, Jackett API key,
-# FileBrowser admin) with the repository's seeding CLI.
+# Seeding (qBittorrent password + Jackett search plugin, Jackett API key)
+# with the repository's seeding CLI. FileBrowser needs none: compose.yaml
+# gives its "admin" user the qBittorrent password on every start.
 # ---------------------------------------------------------------------------
 
 # seed_needed: on first install, when the login changed, or when a seeded
@@ -2047,7 +2125,10 @@ wait_for_stack() {
       stable=0 stuck_since=-1
     fi
     if ((SECONDS - start >= WAIT_SECS)); then
-      WAIT_RESULT=timeout
+      # Everything runs, but still the old definition (or image): that is
+      # CasaOS not switching, not the VPN. (With a TS_WAIT of 300 s or less
+      # the stuck time above is the whole wait, so this decides.)
+      if ((ok == 1 && old == 1)); then WAIT_RESULT=stuck; else WAIT_RESULT=timeout; fi
       return 1
     fi
     sleep "$POLL_SECS"
@@ -2228,23 +2309,11 @@ show_login() {
   fi
 }
 
-# filebrowser_login: the current FileBrowser image reads its settings from
-# /home/filebrowser/data, not from the /config folder the seeding CLI
-# writes, so on first start it makes its own admin password and logs it.
-# Show that password when it is in the log; otherwise the seeded login
-# (the qBittorrent one) applies.
+# FileBrowser's user is always "admin" (FileBrowser's own default; nothing
+# in compose.yaml changes it). Its password is the qBittorrent one, set again
+# on every start (FILEBROWSER_ADMIN_PASSWORD in compose.yaml).
 filebrowser_login() {
-  local id line=""
-  id=$(service_ids filebrowser | head -n1)
-  [[ -n "$id" ]] && line=$(docker logs "$id" 2>&1 | sed 's/\x1b\[[0-9;]*m//g' |
-    sed -n 's/.*[Gg]enerated initial admin password for user "\([^"]*\)"[^:]*:[[:space:]]*\([^[:space:]]*\).*/\1 \2/p' | tail -n1)
-  if [[ -n "$line" && -t 2 ]]; then
-    show "FileBrowser login" "user ${line%% *}, first-run password ${line#* } (it asks you to change it)"
-  elif [[ -n "$line" ]]; then
-    show "FileBrowser login" "user ${line%% *}; first-run password: docker logs ${STACK}-filebrowser-1 2>&1 | grep -i 'initial admin password'"
-  else
-    show "FileBrowser login" "same as qBittorrent"
-  fi
+  show "FileBrowser login" "user admin, the qBittorrent password"
 }
 
 summary() {

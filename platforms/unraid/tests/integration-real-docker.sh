@@ -16,10 +16,17 @@
 #     from the stack folder leaves the running container alone (same project
 #     and config hash as Compose Manager's call);
 #   - the real seeding container wrote the qBittorrent and Jackett configs
-#     into <stack>/appdata as PUID 99;
-#   - what the README says about FileBrowser: it logs a generated admin
-#     password, makes a new one when its container is recreated, and cannot
-#     write in the 99:100 downloads folder (it runs as uid 1000).
+#     into <stack>/appdata as PUID 99, with the search plugin pointing at
+#     127.0.0.1:9117;
+#   - a non-default JACKETT_PORT / FLARESOLVERR_PORT is published by Gluetun
+#     to Jackett's 9117 and FlareSolverr's 8191;
+#   - what the README says about FileBrowser: user "admin" logs in with the
+#     qBittorrent password (one with a space, $, ", \ and #); it keeps its
+#     database in <stack>/appdata/filebrowser across container recreates and
+#     --apply; it runs as uid 1000 with group 100 and can upload and delete
+#     in the 99:100 downloads folder; a new QBITTORRENT_PASSWORD reaches it
+#     through --apply; and after an old install's folder modes (755, no
+#     database) make it fail, --apply gets it running again.
 # Gluetun cannot connect with fake keys, so Compose Manager's "up" fails once
 # Gluetun turns unhealthy (about 6 minutes), or at once on a kernel without
 # IPv6 (compose.yaml sets an IPv6 sysctl); that failure is expected here.
@@ -91,7 +98,10 @@ php_scan_dir=$(php --ini | sed -n 's/^Scan for additional .ini files in: //p')
 
 umask 077
 head -c 32 /dev/urandom | base64 >"$CACHE/wg.key"
-printf 'integration-test-pw\n' >"$CACHE/qbit.pw"
+# A space, $, ", \ and # must reach FileBrowser exactly (through .env and
+# compose's ${QBITTORRENT_PASSWORD}).
+QBIT_PW='int Pa$s"w\d#1x'
+printf '%s\n' "$QBIT_PW" >"$CACHE/qbit.pw"
 umask 022
 
 # --- Install (real docker; the shim only adds a test CA/proxy to the seeding container) ---
@@ -100,7 +110,7 @@ chmod +x "$HERE/shims/"*
 : >"$SHIM_LOG"
 rc=0
 TS_SOURCE_DIR="$REPO" TS_WIREGUARD_PRIVATE_KEY_FILE="$CACHE/wg.key" TS_WIREGUARD_ADDRESSES=10.2.0.2/32 \
-  TS_QBITTORRENT_PASSWORD_FILE="$CACHE/qbit.pw" \
+  TS_QBITTORRENT_PASSWORD_FILE="$CACHE/qbit.pw" TS_JACKETT_PORT=19117 TS_FLARESOLVERR_PORT=18191 \
   timeout 1500 bash "$REPO/platforms/unraid/install.sh" --unattended </dev/null >"$LOGS/install.out" 2>&1 || rc=$?
 echo "installer exit: $rc (non-zero expected: Gluetun cannot connect with fake keys)"
 
@@ -119,6 +129,10 @@ for svc in jackett flaresolverr; do
   c=$(id_of "$svc")
   check "$svc uses Gluetun's network namespace" test "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$c")" == "container:$(docker inspect -f '{{.Id}}' "$g")"
 done
+binding() { docker inspect -f "{{range \$p, \$b := .HostConfig.PortBindings}}{{if eq \$p \"$2\"}}{{range \$b}}{{.HostPort}}{{end}}{{end}}{{end}}" "$1"; }
+check "Gluetun publishes server port 19117 to Jackett's 9117" test "$(binding "$g" 9117/tcp)" == 19117
+check "Gluetun publishes server port 18191 to FlareSolverr's 8191" test "$(binding "$g" 8191/tcp)" == 18191
+check "Gluetun publishes qBittorrent's 8090 as 8090" test "$(binding "$g" 8090/tcp)" == 8090
 if [[ "$(docker inspect -f '{{.State.Running}}' "$g")" == true ]]; then
   check "update-qbittorrent.sh is executable inside Gluetun" docker exec "$g" test -x /gluetun/update-qbittorrent.sh
 else
@@ -140,23 +154,104 @@ check "env-editor style 'docker compose up -d filebrowser' does not recreate it"
 check "seeded qBittorrent password hash in appdata/" grep -q 'WebUI\\Password_PBKDF2="@ByteArray(' "$STACK_DIR/appdata/qbittorrent/qBittorrent/qBittorrent.conf"
 check "seeded Jackett API key in appdata/" grep -q '"APIKey": *"[a-z0-9]\{32\}"' "$STACK_DIR/appdata/jackett/Jackett/ServerConfig.json"
 check "Jackett search plugin downloaded by the seeding container" test -s "$STACK_DIR/appdata/qbittorrent/qBittorrent/nova3/engines/jackett.py"
+check "search plugin points at Jackett inside Gluetun's network (127.0.0.1:9117)" \
+  grep -q '"url": "http://127.0.0.1:9117"' "$STACK_DIR/appdata/qbittorrent/qBittorrent/nova3/engines/jackett.json"
 check "seeded files written as PUID 99 (the CLI dropped root)" test "$(stat -c %u "$STACK_DIR/appdata/qbittorrent/qBittorrent/nova3/engines/jackett.py")" == 99
 # (This install copies TS_SOURCE_DIR, so there is no git checkout to ask;
 # run-tests.sh checks `git status` on a git clone install.)
 check "nothing seeded into the repository's configs/ folders" \
   bash -c "! grep -rqs 'Password_PBKDF2\|APIKey' '$STACK_DIR/configs' '$REPO/configs'"
 
-# What the README says about FileBrowser (limitations of the current image).
-fb_pw() { docker logs "$1" 2>&1 | grep -i 'initial admin password' | tail -n1 | sed 's/.*: //'; }
-sleep 5
-pw1=$(fb_pw "$(id_of filebrowser)")
-check "FileBrowser logs a generated admin password (docker logs ... | grep -i 'initial admin password')" test -n "$pw1"
-check "FileBrowser runs as uid 1000 and cannot write in the 99:100 downloads folder" \
-  bash -c "[[ \$(docker exec '$(id_of filebrowser)' id -u) == 1000 ]] && ! docker exec '$(id_of filebrowser)' touch /srv/downloads/incomplete/fb-write-test 2>/dev/null"
+# What the README says about FileBrowser.
+FB_URL="http://127.0.0.1:8081"
+FB_DB="$STACK_DIR/appdata/filebrowser/database.sqlite"
+urlenc() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+# fb_login PASSWORD: HTTP status of FileBrowser's login as "admin" (the
+# password goes URL-encoded in the X-Password header, as its web UI sends it).
+fb_login() {
+  curl -s -o "$LOGS/fb-token" -w '%{http_code}' -X POST "$FB_URL/api/auth/login?username=admin" \
+    -H "X-Password: $(urlenc "$1")"
+}
+fb_wait() {
+  for _ in $(seq 1 30); do
+    curl -s -o /dev/null "$FB_URL/health" && return 0
+    sleep 1
+  done
+  return 1
+}
+fb_wait || true
+fbc=$(id_of filebrowser)
+check "FileBrowser runs as uid 1000 with group 100 (users) added" \
+  bash -c "[[ \$(docker exec '$fbc' id -u) == 1000 ]] && docker exec '$fbc' id -G | tr ' ' '\n' | grep -qx 100"
+check "FileBrowser keeps its database in appdata/filebrowser" test -s "$FB_DB"
+check "FileBrowser took the admin password from FILEBROWSER_ADMIN_PASSWORD" \
+  bash -c "docker logs '$fbc' 2>&1 | grep -q 'Using admin password from FILEBROWSER_ADMIN_PASSWORD' && ! docker logs '$fbc' 2>&1 | grep -qi 'Generated initial admin password'"
+check "FileBrowser login: admin + the qBittorrent password (space, \$, \", \\, #)" test "$(fb_login "$QBIT_PW")" == 200
+tok=$(cat "$LOGS/fb-token")
+check "FileBrowser login: a wrong password is refused" test "$(fb_login "wrong-$QBIT_PW")" != 200
+up=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $tok" --data-binary 'hello' \
+  "$FB_URL/api/resources?source=srv&path=$(urlenc /downloads/incomplete/fb-upload-test.txt)")
+check "FileBrowser can upload into the 99:100 downloads folder (group write)" \
+  bash -c "[[ '$up' == 200 && \$(stat -c %u:%g /mnt/user/downloads/incomplete/fb-upload-test.txt) == 1000:100 ]]"
+del=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $tok" \
+  "$FB_URL/api/resources?source=srv&path=$(urlenc /downloads/incomplete/fb-upload-test.txt)")
+check "FileBrowser can delete there" bash -c "[[ '$del' == 200 && ! -e /mnt/user/downloads/incomplete/fb-upload-test.txt ]]"
+
+# A recreated container keeps the database: FileBrowser logs "quickSetup
+# created admin user" only when it makes a new database.
 docker compose -p torrent-stack -f "$STACK_DIR/compose.yaml" --env-file "$STACK_DIR/.env" up -d --no-deps --force-recreate filebrowser >"$LOGS/fb-recreate.out" 2>&1 || true
-sleep 8
-pw2=$(fb_pw "$(id_of filebrowser)")
-check "a recreated FileBrowser container makes a new admin password" test -n "$pw2" -a "$pw1" != "$pw2"
+fb_wait || true
+fbc2=$(id_of filebrowser)
+check "FileBrowser container was recreated" test "$fbc2" != "$fbc"
+check "recreated FileBrowser reuses its database (no new admin user made)" \
+  bash -c "docker logs '$fbc2' 2>&1 | grep -q 'Resetting admin user' && ! docker logs '$fbc2' 2>&1 | grep -q 'quickSetup created admin user'"
+check "recreated FileBrowser: same login" test "$(fb_login "$QBIT_PW")" == 200
+
+# A new password in .env (as the ENV tab writes it), then --apply: it
+# re-seeds qBittorrent, fixes the folders while FileBrowser runs (group 100
+# on its database), and Compose recreates FileBrowser with the new password.
+NEW_PW='second Pa$s"w\d#2y'
+python3 - "$STACK_DIR/.env" "$NEW_PW" <<'PY'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+p.write_text(re.sub(r"(?m)^QBITTORRENT_PASSWORD=.*$", lambda m: "QBITTORRENT_PASSWORD='%s'" % sys.argv[2], p.read_text()))
+PY
+rc=0
+TS_SOURCE_DIR="$REPO" timeout 900 bash "$REPO/platforms/unraid/install.sh" --apply </dev/null >"$LOGS/apply.out" 2>&1 || rc=$?
+echo "--apply exit: $rc (non-zero expected: Gluetun cannot connect)"
+fb_wait || true
+fbc3=$(id_of filebrowser)
+check "--apply: FileBrowser's database is group 100 and group-writable" \
+  bash -c "[[ \$(stat -c %g '$FB_DB') == 100 && \$(( 0\$(stat -c %a '$FB_DB') & 060 )) == 48 ]]"
+check "--apply: the new qBittorrent password logs in to FileBrowser" test "$(fb_login "$NEW_PW")" == 200
+check "--apply: the old password no longer does" test "$(fb_login "$QBIT_PW")" != 200
+check "--apply: FileBrowser kept its database (no new admin user made)" \
+  bash -c "! docker logs '$fbc3' 2>&1 | grep -q 'quickSetup created admin user'"
+check "--apply: FileBrowser logs no database write errors" \
+  bash -c "! docker logs '$fbc3' 2>&1 | grep -qi 'readonly database'"
+
+# Upgrade path (README, "Coming from an install made before ..."): the old
+# installer left appdata/filebrowser empty (FileBrowser kept its database in
+# the container), 99:100 and 755, and its --update recreates FileBrowser with
+# the new compose.yaml. FileBrowser then cannot create its database and keeps
+# restarting, until the new installer's --apply fixes the folder.
+docker compose -p torrent-stack -f "$STACK_DIR/compose.yaml" --env-file "$STACK_DIR/.env" stop filebrowser >/dev/null 2>&1 || true
+rm -f "$STACK_DIR/appdata/filebrowser/"database.sqlite*
+chown 99:100 "$STACK_DIR/appdata/filebrowser"
+chmod 755 "$STACK_DIR/appdata/filebrowser"
+docker compose -p torrent-stack -f "$STACK_DIR/compose.yaml" --env-file "$STACK_DIR/.env" up -d --no-deps --force-recreate filebrowser >"$LOGS/fb-old.out" 2>&1 || true
+sleep 15
+fbc4=$(id_of filebrowser)
+check "old folder modes: FileBrowser cannot open its database and restarts (the failure the README describes)" \
+  bash -c "docker logs '$fbc4' 2>&1 | grep -qi 'unable to open database file' && [[ \$(docker inspect -f '{{.RestartCount}}' '$fbc4') -ge 1 ]]"
+rc=0
+TS_SOURCE_DIR="$REPO" timeout 900 bash "$REPO/platforms/unraid/install.sh" --apply </dev/null >"$LOGS/apply-upgrade.out" 2>&1 || rc=$?
+echo "--apply (upgrade) exit: $rc (non-zero expected: Gluetun cannot connect)"
+for _ in $(seq 1 60); do
+  [[ "$(fb_login "$NEW_PW")" == 200 ]] && break
+  sleep 2
+done
+check "after --apply: FileBrowser starts again and the login works" test "$(fb_login "$NEW_PW")" == 200
 
 docker compose -p torrent-stack -f "$STACK_DIR/compose.yaml" --env-file "$STACK_DIR/.env" down >"$LOGS/down.out" 2>&1 || true
 echo "passed: $PASS  failed: $FAIL  (logs: $LOGS)"

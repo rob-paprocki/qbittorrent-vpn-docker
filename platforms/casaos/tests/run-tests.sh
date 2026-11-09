@@ -81,6 +81,10 @@ OVPN_PASS="Ovpn-Test-Pass-9"
   umask 077
   printf '%s\n' "$WG_KEY" >"$WORK/wg.key"
   printf '%s\n' "$QB_PASS" >"$WORK/qb.pass"
+  # Passwords FileBrowser cannot use as its admin password.
+  printf '%s\n' admin >"$WORK/qb-admin.pass"
+  printf '%s\n' abcd >"$WORK/qb-short.pass"
+  printf '%s\n' "$(printf 'x%.0s' $(seq 1 73))" >"$WORK/qb-long.pass"
 )
 
 # A copy of the working tree as TS_SOURCE_DIR (no .git, .env or runtime
@@ -214,6 +218,19 @@ container_revs() { python3 -I -c 'import json,sys; print(" ".join(f"{c["service"
 # Are Gluetun, qBittorrent, Jackett and FlareSolverr in one namespace?
 one_netns() { python3 -I -c 'import json,sys; rows=json.load(open(sys.argv[1])); sys.exit(len({c["netns"] for c in rows if c["service"] in ("gluetun","qbittorrent","jackett","flaresolverr")}) != 1)' "$STATE/containers.json"; }
 owner_of() { stat -c '%u:%g' "$1"; }
+owner_mode_of() { stat -c '%u:%g %a' "$1"; }
+# fb_rendered FILE PASSWORD PGID CONFIG_DIR: FileBrowser's part of a rendered
+# app is what compose.yaml asks for: its database in its config folder, the
+# qBittorrent password for "admin", and PGID as an extra group.
+fb_rendered() { python3 -I -c 'import sys,yaml
+f, pw, pgid, cfg = sys.argv[1:5]
+s = yaml.safe_load(open(f))["services"]["filebrowser"]
+env = s["environment"]
+assert env["FILEBROWSER_DATABASE_PATH"] == "/config/database.sqlite", env
+assert env["FILEBROWSER_ADMIN_PASSWORD"] == pw, "admin password"
+assert s["group_add"] == [pgid], s.get("group_add")
+binds = {v["target"]: v["source"] for v in s["volumes"]}
+assert binds["/config"] == cfg, binds' "$@"; }
 
 # ---------------------------------------------------------------------------
 section "Static checks"
@@ -265,6 +282,11 @@ check "a whole disk (/media/<disk>) as downloads folder: refused" test "$RC" != 
 run_inst qbport TS_QBIT_WEBUI_PORT=9117 TS_JACKETT_PORT=9118 TS_WIREGUARD_PRIVATE_KEY_FILE="$WORK/wg.key" \
   TS_WIREGUARD_ADDRESSES=10.2.0.2/32 TS_QBITTORRENT_PASSWORD_FILE="$WORK/qb.pass" -- -y --dry-run
 check "QBIT_WEBUI_PORT on a port used inside Gluetun's network: refused" test "$RC" != 0 -a -n "$(grep "taken inside Gluetun's network" "$LOG")"
+for pw in admin:"ignores the password 'admin'" short:"needs at least 5 characters" long:"takes at most 72 bytes"; do
+  run_inst "fbpass-${pw%%:*}" TS_WIREGUARD_PRIVATE_KEY_FILE="$WORK/wg.key" TS_WIREGUARD_ADDRESSES=10.2.0.2/32 \
+    TS_QBITTORRENT_PASSWORD_FILE="$WORK/qb-${pw%%:*}.pass" -- -y --dry-run
+  check "a qBittorrent password FileBrowser cannot use (${pw%%:*}): refused" test "$RC" != 0 -a -n "$(grep -F "${pw#*:}" "$LOG")"
+done
 
 section "Dry run (fresh)"
 mark_requests
@@ -323,19 +345,25 @@ check "seeding ran in the pinned python container (tag and digest)" grep -qE "^c
 check "fake qBittorrent migrated its settings on first start ([WebUI], MigrationVersion=12)" bash -c "grep -qx 'MigrationVersion=12' '$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf' && grep -qx '\[WebUI\]' '$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf'"
 check "the apps behind Gluetun restart with it (depends_on restart: true)" test "$(grep -c '^        restart: true$' "$STACK/casaos-app.yml")" == 3
 check "Jackett and FlareSolverr keep their own ports inside (9117, 8191)" bash -c "grep -A1 -x '      - target: 9117' '$STACK/casaos-app.yml' | grep -q \"published: '9117'\" && grep -A1 -x '      - target: 8191' '$STACK/casaos-app.yml' | grep -q \"published: '8191'\""
+check "FileBrowser: database in its config folder, qBittorrent password for admin, PGID as extra group" \
+  fb_rendered "$STACK/casaos-app.yml" "$QB_PASS" 1000 "$STACK/configs/filebrowser"
 check "every container carries its service's revision label" test "$(revs_in "$STACK/casaos-app.yml")" == "$(container_revs)"
 check "after the wait: shared network checked, every web UI and the login checked" bash -c "grep -q \"share Gluetun's network\" '$LOG' && grep -q 'qBittorrent accepts the login in .env' '$LOG'"
 check "qBittorrent seeded (PBKDF2 + search on)" bash -c "grep -q 'Password_PBKDF2=' '$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf' &&
   grep -q 'Search\\\\SearchEnabled=true' '$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf'"
 check "Jackett API key and search plugin wiring" bash -c "grep -q '\"APIKey\"' '$STACK/configs/jackett/Jackett/ServerConfig.json' &&
   grep -q 'http://127.0.0.1:9117' '$STACK/configs/qbittorrent/qBittorrent/nova3/engines/jackett.json'"
-check "no FileBrowser seed (its image ignores it; nothing needs bcrypt)" test ! -e "$STACK/configs/filebrowser/settings.yaml"
+check "no FileBrowser seed file (compose.yaml sets its password; nothing needs bcrypt)" test ! -e "$STACK/configs/filebrowser/settings.yaml"
 check "seeded files belong to PUID:PGID" test "$(owner_of "$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf")" == 1000:1000
 check "configs owned by PUID:PGID" test "$(owner_of "$STACK/configs/qbittorrent")" == 1000:1000
-check "incomplete folder created and owned by PUID:PGID" test "$(owner_of "$DOWNLOADS/incomplete")" == 1000:1000
+check "incomplete folder created: PUID:PGID, 2775 (group-writable, setgid)" test "$(owner_mode_of "$DOWNLOADS/incomplete")" == "1000:1000 2775"
+check "FileBrowser's config folder: PUID:PGID, 2775 (FileBrowser writes as uid 1000 + PGID)" test "$(owner_mode_of "$STACK/configs/filebrowser")" == "1000:1000 2775"
+check "an existing downloads folder keeps its owner and mode (root, 755 here), with a warning naming FileBrowser" \
+  bash -c "test \"\$(stat -c '%u %a' '$DOWNLOADS')\" == '0 755' && grep -q 'FileBrowser (uid 1000, group 1000) may not be able to write there' '$LOG'"
 check "all five images pulled first" test "$(grep -c '"pull"' "$STATE/docker.log")" == 5
 check "waited for the app and printed the URLs" bash -c "grep -q 'All containers are running' '$LOG' && grep -q 'qBittorrent:.*:8090' '$LOG'"
-check "FileBrowser's first-run password not printed into a log file (no terminal)" bash -c "! grep -q 'fb-test-pass' '$LOG' && grep -q 'initial admin password' '$LOG'"
+check "summary: FileBrowser login is admin with the qBittorrent password; no container log read" \
+  bash -c "grep -q 'FileBrowser login: *user admin, the qBittorrent password' '$LOG' && ! grep -qi 'initial admin password' '$LOG' && ! grep -q '\"logs\"' '$STATE/docker.log'"
 check "no secret on any docker command line" no_secrets_in "$STATE/docker.log"
 check "no secret on any curl command line" no_secrets_in "$STATE/curl.log"
 check "no secret in the installer output" no_secrets_in "$LOG"
@@ -391,6 +419,8 @@ check "qBittorrent stopped before seeding (FileBrowser is not seeded)" bash -c "
 check "qBittorrent.conf re-seeded" test "$conf_before" != "$(sha256sum "$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf")"
 check "the new login is in [WebUI] too (qBittorrent 5.x reads only that)" bash -c "sed -n '/^\[WebUI\]/,/^\[/p' '$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf' | grep -q '^Password_PBKDF2='"
 check "seeded files belong to PUID, not root" test "$(stat -c %u "$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf")" != 0
+check "FileBrowser gets the new password too (recreated with it)" test "$fb" != "$(id_of filebrowser)"
+check "...in the stored app" fb_rendered "$STATE/apps/torrent-stack.yml" "$QB_PASS2" 1000 "$STACK/configs/filebrowser"
 check "fake qBittorrent accepts the new password and refuses the old one" bash -c "$(declare -f qbit_accepts); HERE='$HERE'; qbit_accepts '$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf' admin '$QB_PASS2' && ! qbit_accepts '$STACK/configs/qbittorrent/qBittorrent/qBittorrent.conf' admin '$QB_PASS'"
 check "no secret on any command line after re-seeding" no_secrets_in "$STATE/docker.log"
 check "no secret on any curl command line (login check sends files)" no_secrets_in "$STATE/curl.log"
@@ -416,6 +446,12 @@ check "only the host port changes: 9118 -> 9117, 8192 -> 8191" bash -c "grep -A1
 check "search plugin points at Jackett's own port 9117" has "$STACK/configs/qbittorrent/qBittorrent/nova3/engines/jackett.json" '"url": "http://127.0.0.1:9117"'
 check "no re-seeding (qBittorrent not stopped) for a port change" bash -c "! grep -q 'Stopping qBittorrent' '$LOG'"
 check "the probes went to the new host ports" bash -c "grep -q '^9118 /UI/Dashboard 302' '$STATE/app-requests.log' && grep -q '^8192 / 200' '$STATE/app-requests.log'"
+if python3 -I "$HERE/lib/compare_compose.py" "$STACK/casaos-app.yml" "$SRC/compose.yaml" "$STACK/.env" "$STACK" \
+  ${IPV6_FLAG[@]+"${IPV6_FLAG[@]}"} >"$OUT/drift-ports.txt" 2>&1; then
+  ok "with JACKETT_PORT=9118, FLARESOLVERR_PORT=8192 the services match compose.yaml (JACKETT_PORT:9117 there too)"
+else
+  bad "with JACKETT_PORT=9118, FLARESOLVERR_PORT=8192 the services match compose.yaml (JACKETT_PORT:9117 there too)" "$(head -3 "$OUT/drift-ports.txt")"
+fi
 sed -i -e 's/^JACKETT_PORT=.*/JACKETT_PORT=9117/' -e 's/^FLARESOLVERR_PORT=.*/FLARESOLVERR_PORT=8191/' "$STACK/.env"
 run_inst apply-jport-back -- --apply
 check "ports back to 9117/8191" test "$RC" == 0
@@ -510,6 +546,12 @@ check "DOWNLOADS_PATH in .env that contains the stack: refused by --apply" test 
 cp "$WORK/env.good" "$STACK/.env"
 
 cp "$STACK/.env" "$WORK/env.good"
+sed -i "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD=abcd/" "$STACK/.env"
+mark_requests
+run_inst apply-shortpass -- --apply
+check "a 4-character QBITTORRENT_PASSWORD in .env: refused (FileBrowser's admin password)" test "$RC" != 0 -a -n "$(grep "is also FileBrowser's admin password, and FileBrowser needs at least 5 characters" "$LOG")"
+check "nothing sent to CasaOS after that refusal" test -z "$(requests_since | grep -E '^(PUT|POST)')"
+cp "$WORK/env.good" "$STACK/.env"
 sed -i "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD='pa\$\$word'/" "$STACK/.env"
 mark_requests
 run_inst apply-dollar -- --apply
@@ -660,6 +702,54 @@ run_inst noreg TS_APPDATA="$APPDATA3" TS_WIREGUARD_PRIVATE_KEY_FILE="$WORK/wg.ke
 check "--no-register exits 0" test "$RC" == 0
 check "CasaOS is not contacted at all" test -z "$(requests_since)"
 check "the YAML to import is ready (0600) with the Import steps" bash -c "test -f '$APPDATA3/torrent-stack/casaos-app.yml' && grep -q 'Install a customized app > Import' '$LOG'"
+
+section "PUID/PGID other than 1000 (FileBrowser still runs as uid 1000)"
+# FileBrowser's image always runs as uid 1000; compose.yaml adds PGID as an
+# extra group. With PUID 1001 / PGID 1002 it must still be able to write its
+# database and the downloads, through the group.
+APPDATA6="$WORK/DATA6/AppData"
+DL6="$WORK/DATA6/Media/Downloads"
+S6="$APPDATA6/torrent-stack"
+mkdir -p "$S6/configs/qbittorrent/qBittorrent/nova3/engines" "$S6/configs/filebrowser"
+echo "# test stub" >"$S6/configs/qbittorrent/qBittorrent/nova3/engines/jackett.py"
+# What FileBrowser wrote on an earlier start: its files belong to uid 1000.
+printf 'db' >"$S6/configs/filebrowser/database.sqlite"
+chown 1000:1000 "$S6/configs/filebrowser/database.sqlite"
+chmod 644 "$S6/configs/filebrowser/database.sqlite"
+run_inst pgid TS_APPDATA="$APPDATA6" TS_DOWNLOADS="$DL6" TS_PUID=1001 TS_PGID=1002 \
+  TS_WIREGUARD_PRIVATE_KEY_FILE="$WORK/wg.key" TS_WIREGUARD_ADDRESSES=10.2.0.2/32 \
+  TS_QBITTORRENT_PASSWORD_FILE="$WORK/qb.pass" -- -y --no-register
+check "PUID 1001 / PGID 1002 (--no-register) exits 0" test "$RC" == 0
+check "FileBrowser gets 1002 as extra group in the rendered app" fb_rendered "$S6/casaos-app.yml" "$QB_PASS" 1002 "$S6/configs/filebrowser"
+if python3 -I "$HERE/lib/compare_compose.py" "$S6/casaos-app.yml" "$SRC/compose.yaml" "$S6/.env" "$S6" \
+  ${IPV6_FLAG[@]+"${IPV6_FLAG[@]}"} >"$OUT/drift-pgid.txt" 2>&1; then
+  ok "with PUID 1001 / PGID 1002 the services match compose.yaml"
+else
+  bad "with PUID 1001 / PGID 1002 the services match compose.yaml" "$(head -3 "$OUT/drift-pgid.txt")"
+fi
+check "new downloads folder and its incomplete folder: 1001:1002, 2775" \
+  test "$(owner_mode_of "$DL6") $(owner_mode_of "$DL6/incomplete")" == "1001:1002 2775 1001:1002 2775"
+check "FileBrowser's config folder: 1001:1002, 2775" test "$(owner_mode_of "$S6/configs/filebrowser")" == "1001:1002 2775"
+check "its database from an earlier start: 1001:1002 and group-writable (664)" test "$(owner_mode_of "$S6/configs/filebrowser/database.sqlite")" == "1001:1002 664"
+check "qBittorrent's config folder: 1001:1002, not group-writable (only PUID writes there)" test "$(owner_mode_of "$S6/configs/qbittorrent")" == "1001:1002 755"
+check "no warning about the downloads folder (made by the installer)" lacks "$LOG" "may not be able to write there"
+# The kernel's verdict: a process as uid 1000 with the extra group 1002 (what
+# Docker gives FileBrowser for group_add) can write there; without it, not.
+if command -v setpriv >/dev/null 2>&1; then
+  as_fb() { setpriv --reuid=1000 --regid=1000 --groups="$1" -- "${@:2}"; }
+  check "as uid 1000 + group 1002: write the database, create files in its folder and the downloads" \
+    as_fb 1000,1002 sh -c "printf x >>'$S6/configs/filebrowser/database.sqlite' && : >'$S6/configs/filebrowser/database.sqlite-wal' && mkdir '$DL6/from-filebrowser' && : >'$DL6/incomplete/x'"
+  check "...the files it creates there get group 1002 (setgid)" \
+    test "$(stat -c %g "$S6/configs/filebrowser/database.sqlite-wal") $(stat -c %g "$DL6/from-filebrowser")" == "1002 1002"
+  check_not "control: as uid 1000 without group 1002, its database is read-only" \
+    as_fb 1000 sh -c "printf x >>'$S6/configs/filebrowser/database.sqlite'"
+  rm -f "$S6/configs/filebrowser/database.sqlite-wal"
+  run_inst pgid-again TS_APPDATA="$APPDATA6" TS_DOWNLOADS="$DL6" -- -y --no-register
+  check "a re-run keeps it so (database group-writable, folder setgid)" \
+    test "$RC $(owner_mode_of "$S6/configs/filebrowser/database.sqlite") $(owner_mode_of "$S6/configs/filebrowser")" == "0 1001:1002 664 1001:1002 2775"
+else
+  skip "write checks as uid 1000 + group 1002" "setpriv (util-linux) is not installed"
+fi
 
 section "ZimaOS"
 run_inst zima PATH="$HERE/shims:$HERE/shims/zimaos-bin:$PATH" TS_APPDATA="$APPDATA3" -- -y --dry-run

@@ -96,6 +96,7 @@ check() { # check "description" command...
 }
 has() { grep -qF -- "$2" "$1"; }
 hasnt() { ! grep -qF -- "$2" "$1"; }
+has_line() { grep -qxF -- "$2" "$1"; }
 file_is() { [[ -f "$1" && "$(cat "$1")" == "$2" ]]; }
 mode_is() { [[ "$(stat -c %a "$1")" == "$2" ]]; }
 owner_is() { [[ "$(stat -c %u:%g "$1")" == "$2" ]]; }
@@ -213,6 +214,30 @@ run_autostart() {
 
 out() { echo "$FAKE/logs/$1.out"; }
 
+# compose_summary NAME: what docker compose makes of the installed stack, one
+# fact per line, in logs/NAME.compose: Gluetun's published ports
+# (server:inside/protocol) and FileBrowser's environment, extra groups and
+# folders. Compose prints a literal $ as $$; it is turned back into $ here.
+# A failure leaves the file empty, so the checks on it fail (not the suite).
+compose_summary() {
+  : >"$FAKE/logs/$1.compose"
+  docker compose -p torrent-stack -f "$STACK_DIR/compose.yaml" --env-file "$STACK_DIR/.env" config --format json |
+    python3 -c '
+import json, sys
+s = json.load(sys.stdin)["services"]
+for p in s["gluetun"]["ports"]:
+    print("port %s:%s/%s" % (p["published"], p["target"], p["protocol"]))
+fb = s["filebrowser"]
+for k, v in sorted(fb["environment"].items()):
+    print("fb-env %s=%s" % (k, v.replace("$$", "$")))
+for g in fb.get("group_add", []):
+    print("fb-group_add %s" % g)
+for v in fb["volumes"]:
+    print("fb-volume %s:%s" % (v["source"], v["target"]))
+' >"$FAKE/logs/$1.compose" || true
+}
+summary() { echo "$FAKE/logs/$1.compose"; }
+
 echo "Unraid installer tests (fake root: $FAKE)"
 
 # ---------------------------------------------------------------------------
@@ -292,6 +317,10 @@ check "dry run: hides the qBittorrent password" hasnt "$(out dry)" "w0rd"
 check "dry run: shows the compose.sh call" has "$(out dry)" "compose.sh -c up -p torrent-stack"
 check "dry run: no compose up recorded" hasnt "$SHIM_LOG" " up "
 check "dry run: no seeding container started" hasnt "$SHIM_LOG" "docker run"
+check "dry run: shows the downloads made group-writable with setgid" has "$(out dry)" "would run: chmod g+s /mnt/user/downloads /mnt/user/downloads/incomplete"
+check "dry run: shows FileBrowser's folder made group-writable" has "$(out dry)" "would run: chmod -R g+rwX /mnt/user/appdata/torrent-stack/appdata/filebrowser"
+check "dry run: shows the search plugin seeded for 127.0.0.1:9117" has "$(out dry)" "--jackett-port 9117"
+check "dry run: summary names FileBrowser's login" has "$(out dry)" "admin (with the qBittorrent password)"
 
 # ---------------------------------------------------------------------------
 echo "* install without VPN keys (startup gating)"
@@ -328,7 +357,27 @@ check "gated install: Jackett search plugin installed" test -s "$APPCFG/qbittorr
 check "gated install: Jackett API key" has "$APPCFG/jackett/Jackett/ServerConfig.json" '"APIKey"'
 check "gated install: nothing seeded into the repository's configs/ folder" \
   bash -c "! grep -rqs 'Password_PBKDF2\|APIKey' '$STACK_DIR/configs' '$REPO/configs'"
-check "gated install: no FileBrowser seed (the image ignores it)" test ! -e "$APPCFG/filebrowser/settings.yaml"
+check "gated install: no FileBrowser seed (compose.yaml sets its admin password)" test ! -e "$APPCFG/filebrowser/settings.yaml"
+check "gated install: search plugin seeded with --jackett-port 9117" has "$SHIM_LOG" "--jackett-port 9117"
+check "gated install: search plugin points at Jackett inside Gluetun's network (127.0.0.1:9117)" \
+  python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["url"] == "http://127.0.0.1:9117" else 1)' \
+  "$APPCFG/qbittorrent/qBittorrent/nova3/engines/jackett.json"
+# FileBrowser runs as uid 1000 with PGID (100) as an extra group: its config
+# folder and the downloads must be writable for group 100, with setgid.
+check "gated install: FileBrowser's config folder is 99:100" owner_is "$APPCFG/filebrowser" "99:100"
+check "gated install: FileBrowser's config folder is 2775 (group write, setgid)" mode_is "$APPCFG/filebrowser" 2775
+check "gated install: downloads folder is 99:100, 2775" bash -c "[[ \$(stat -c %u:%g:%a /mnt/user/downloads) == 99:100:2775 ]]"
+check "gated install: incomplete folder is 99:100, 2775" bash -c "[[ \$(stat -c %u:%g:%a /mnt/user/downloads/incomplete) == 99:100:2775 ]]"
+check "gated install: qBittorrent's config folder is not opened up to the group (755)" mode_is "$APPCFG/qbittorrent" 755
+compose_summary gated
+check "compose: qBittorrent published on 8090 (same port inside)" has_line "$(summary gated)" "port 8090:8090/tcp"
+check "compose: Jackett published 9117 -> 9117" has_line "$(summary gated)" "port 9117:9117/tcp"
+check "compose: FlareSolverr published 8191 -> 8191" has_line "$(summary gated)" "port 8191:8191/tcp"
+check "compose: FileBrowser database in its config folder" has_line "$(summary gated)" "fb-env FILEBROWSER_DATABASE_PATH=/config/database.sqlite"
+check "compose: FileBrowser admin password is the qBittorrent password, exactly" has_line "$(summary gated)" "fb-env FILEBROWSER_ADMIN_PASSWORD=${QBIT_PW}"
+check "compose: FileBrowser gets PGID 100 as an extra group" has_line "$(summary gated)" "fb-group_add 100"
+check "compose: FileBrowser's /config is appdata/filebrowser" has_line "$(summary gated)" "fb-volume $APPCFG/filebrowser:/config"
+check "compose: FileBrowser serves the downloads folder" has_line "$(summary gated)" "fb-volume /mnt/user/downloads:/srv/downloads"
 check "gated install: seeding installs nothing from PyPI" hasnt "$SHIM_LOG" "pip install"
 check "gated install: seeding image pinned by digest" has "$SHIM_LOG" "python:3.14.9-slim-trixie@sha256:"
 check "gated install: seeding mounts the stack folder read-only" has "$SHIM_LOG" "-v $STACK_DIR:$STACK_DIR:ro"
@@ -360,8 +409,22 @@ check "gated install: qBittorrent password round-trips (docker compose)" bash -c
 echo "* --apply after filling in the VPN keys (as the ENV tab would)"
 : >"$SHIM_LOG"
 sed -i "s|^WIREGUARD_PRIVATE_KEY=.*|WIREGUARD_PRIVATE_KEY=${WG_KEY}|; s|^WIREGUARD_ADDRESSES=.*|WIREGUARD_ADDRESSES=10.2.0.2/32|" "$STACK_DIR/.env"
+# The database FileBrowser makes (as uid 1000, umask 022) in its config folder.
+for f in database.sqlite database.sqlite-wal; do
+  printf 'fb-db\n' >"$APPCFG/filebrowser/$f"
+  chown 1000:1000 "$APPCFG/filebrowser/$f"
+  chmod 644 "$APPCFG/filebrowser/$f"
+done
 run_installer apply SHIM_QBIT_RUNNING=1 -- --apply
 check "apply: exit 0" rc_is apply 0
+check "apply: FileBrowser's database keeps its owner (uid 1000)" bash -c "[[ \$(stat -c %u '$APPCFG/filebrowser/database.sqlite') == 1000 ]]"
+check "apply: FileBrowser's database and WAL file are group 100, group-writable (664)" \
+  bash -c "[[ \$(stat -c %g:%a '$APPCFG/filebrowser/database.sqlite') == 100:664 && \$(stat -c %g:%a '$APPCFG/filebrowser/database.sqlite-wal') == 100:664 ]]"
+check "apply: FileBrowser's database content untouched" bash -c "[[ \$(cat '$APPCFG/filebrowser/database.sqlite') == fb-db ]]"
+check "apply: FileBrowser's config folder still 99:100, 2775" bash -c "[[ \$(stat -c %u:%g:%a '$APPCFG/filebrowser') == 99:100:2775 ]]"
+check "apply: prints FileBrowser's login (admin + the qBittorrent password)" has "$(out apply)" "admin / the same password as qBittorrent"
+check "apply: no longer sends people to FileBrowser's log for a password" hasnt "$(out apply)" "initial admin password"
+check "apply: prints Jackett on JACKETT_PORT" grep -qE 'Jackett: +http://[^ ]+:9117' "$(out apply)"
 check "apply: autostart on" file_is "$CM_STACK/autostart" "true"
 check "apply: stops qBittorrent before seeding" has "$SHIM_LOG" "stop qbittorrent"
 check "apply: started through Compose Manager's compose.sh" \
@@ -465,6 +528,61 @@ v = env_io.parse_env_literal(pathlib.Path(sys.argv[2]))["OPENVPN_PASSWORD"]
 sys.exit(0 if v == sys.argv[3] else 1)' "$REPO/scripts/env-editor" "$STACK_DIR/.env" "$OVPN_PW"
 check "openvpn: country with a space quoted" has "$STACK_DIR/.env" "SERVER_COUNTRIES='United States'"
 check "openvpn: started" has "$SHIM_LOG" "-p torrent-stack up -d"
+
+# ---------------------------------------------------------------------------
+echo "* ports: Jackett and FlareSolverr on any free server port"
+reset_all
+run_installer ports TS_JACKETT_PORT=19117 TS_FLARESOLVERR_PORT=18191 TS_WIREGUARD_PRIVATE_KEY_FILE="$FAKE/secrets/wg" \
+  TS_WIREGUARD_ADDRESSES=10.2.0.2/32 TS_QBITTORRENT_PASSWORD_FILE="$FAKE/secrets/qbit" -- --unattended
+check "ports 19117/18191: exit 0 (no longer refused)" rc_is ports 0
+check "ports 19117/18191: stored in .env" bash -c "grep -qx 'JACKETT_PORT=19117' '$STACK_DIR/.env' && grep -qx 'FLARESOLVERR_PORT=18191' '$STACK_DIR/.env'"
+compose_summary ports
+check "ports 19117/18191: compose publishes 19117 -> Jackett's 9117" has_line "$(summary ports)" "port 19117:9117/tcp"
+check "ports 19117/18191: compose publishes 18191 -> FlareSolverr's 8191" has_line "$(summary ports)" "port 18191:8191/tcp"
+check "ports 19117/18191: search plugin still points at 127.0.0.1:9117" \
+  python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["url"] == "http://127.0.0.1:9117" else 1)' \
+  "$STACK_DIR/appdata/qbittorrent/qBittorrent/nova3/engines/jackett.json"
+check "ports 19117/18191: Jackett's own port stays 9117" \
+  python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["Port"] == 9117 else 1)' "$STACK_DIR/appdata/jackett/Jackett/ServerConfig.json"
+check "ports 19117/18191: prints Jackett on the server port" grep -qE 'Jackett: +http://[^ ]+:19117' "$(out ports)"
+sed -i 's/^JACKETT_PORT=.*/JACKETT_PORT=29117/' "$STACK_DIR/.env"
+run_installer ports-apply -- --apply
+check "--apply after JACKETT_PORT changed in the ENV tab: exit 0" rc_is ports-apply 0
+compose_summary ports-apply
+check "--apply: compose publishes 29117 -> 9117" has_line "$(summary ports-apply)" "port 29117:9117/tcp"
+check "--apply: search plugin still points at 127.0.0.1:9117" \
+  python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))["url"] == "http://127.0.0.1:9117" else 1)' \
+  "$STACK_DIR/appdata/qbittorrent/qBittorrent/nova3/engines/jackett.json"
+sed -i 's/^FLARESOLVERR_PORT=.*/FLARESOLVERR_PORT=8090/' "$STACK_DIR/.env"
+run_installer ports-apply-dup -- --apply
+check "--apply with FLARESOLVERR_PORT = QBIT_WEBUI_PORT: refused" \
+  bash -c "[[ \$(cat '$FAKE/logs/ports-apply-dup.rc') == 1 ]] && grep -qF 'QBIT_WEBUI_PORT and FLARESOLVERR_PORT are both 8090' '$(out ports-apply-dup)'"
+reset_all
+run_installer port-dup TS_FILEBROWSER_PORT=8090 TS_QBITTORRENT_PASSWORD_FILE="$FAKE/secrets/qbit" -- --unattended
+check "FILEBROWSER_PORT = QBIT_WEBUI_PORT: refused" has "$(out port-dup)" "QBIT_WEBUI_PORT and FILEBROWSER_PORT are both 8090"
+check "duplicate ports: nothing written" test ! -e "$STACK_DIR/.env"
+run_installer port-inner TS_QBIT_WEBUI_PORT=9117 TS_JACKETT_PORT=19117 TS_QBITTORRENT_PASSWORD_FILE="$FAKE/secrets/qbit" -- --unattended
+check "QBIT_WEBUI_PORT 9117 (Jackett's port inside Gluetun's network): refused" has "$(out port-inner)" "QBIT_WEBUI_PORT cannot be 9117"
+
+echo "* the qBittorrent password is also FileBrowser's (bcrypt: at most 72 bytes)"
+reset_all
+printf '%s\n' "$(printf 'a%.0s' {1..73})" >"$FAKE/secrets/long"
+run_installer pw-long TS_QBITTORRENT_PASSWORD_FILE="$FAKE/secrets/long" -- --unattended
+check "73-byte password: refused" has "$(out pw-long)" "is 73 bytes long; at most 72 work"
+check "73-byte password: nothing written" test ! -e "$STACK_DIR/.env"
+check "73-byte password: not printed" hasnt "$(out pw-long)" "aaaaaaaaaa"
+# 37 characters, but 74 bytes (é is 2 bytes in UTF-8): bytes are what count.
+printf '%s\n' "$(printf '\xc3\xa9%.0s' {1..37})" >"$FAKE/secrets/long-utf8"
+run_installer pw-long-utf8 TS_QBITTORRENT_PASSWORD_FILE="$FAKE/secrets/long-utf8" -- --unattended
+check "37 characters / 74 bytes: refused" has "$(out pw-long-utf8)" "is 74 bytes long"
+printf '%s\n' "$(printf 'b%.0s' {1..72})" >"$FAKE/secrets/max"
+run_installer pw-max TS_QBITTORRENT_PASSWORD_FILE="$FAKE/secrets/max" -- --unattended
+check "72-byte password: accepted" rc_is pw-max 0
+sed -i "s|^QBITTORRENT_PASSWORD=.*|QBITTORRENT_PASSWORD=$(printf 'c%.0s' {1..80})|; s|^WIREGUARD_PRIVATE_KEY=.*|WIREGUARD_PRIVATE_KEY=${WG_KEY}|; s|^WIREGUARD_ADDRESSES=.*|WIREGUARD_ADDRESSES=10.2.0.2/32|" "$STACK_DIR/.env"
+: >"$SHIM_LOG"
+run_installer pw-apply -- --apply
+check "--apply with an 80-byte password from the ENV tab: refused before anything starts" \
+  bash -c "[[ \$(cat '$FAKE/logs/pw-apply.rc') == 1 ]] && grep -qF 'is 80 bytes long' '$(out pw-apply)' && ! grep -q ' up -d' '$SHIM_LOG'"
 
 # ---------------------------------------------------------------------------
 echo "* conflicts"
@@ -656,14 +774,33 @@ echo "stale" >"$STACK_DIR/compose.yaml.orig-test"
 sed -i 's/^PUID=99$/PUID=99/' "$STACK_DIR/.env"
 cp "$STACK_DIR/.env" "$FAKE/env.before"
 cp "$STACK_DIR/appdata/qbittorrent/qBittorrent/qBittorrent.conf" "$FAKE/qbit.before"
+# The folders as an install from before this compose.yaml left them: owned
+# 99:100 but writable for the owner only. The new FileBrowser container
+# (uid 1000, group 100) could not create its database there.
+chmod 755 "$STACK_DIR/appdata/filebrowser" /mnt/user/downloads /mnt/user/downloads/incomplete
 : >"$SHIM_LOG"
 run_installer update -- --update
 check "update: exit 0" rc_is update 0
+check "update: FileBrowser's config folder made 99:100, 2775 for the new compose.yaml" \
+  bash -c "[[ \$(stat -c %u:%g:%a '$STACK_DIR/appdata/filebrowser') == 99:100:2775 ]]"
+check "update: downloads folders made 2775" \
+  bash -c "[[ \$(stat -c %a /mnt/user/downloads) == 2775 && \$(stat -c %a /mnt/user/downloads/incomplete) == 2775 ]]"
+check "update: folders fixed before the containers are recreated" bash -c "
+  ready=\$(grep -n 'Folders ready' '$(out update)' | head -1 | cut -d: -f1)
+  pull=\$(grep -n 'Pulling new images' '$(out update)' | head -1 | cut -d: -f1)
+  [[ -n \$ready && -n \$pull && \$ready -lt \$pull ]]"
 check "update: .env kept" cmp -s "$FAKE/env.before" "$STACK_DIR/.env"
 check "update: qBittorrent config kept" cmp -s "$FAKE/qbit.before" "$STACK_DIR/appdata/qbittorrent/qBittorrent/qBittorrent.conf"
 check "update: images pulled through compose.sh" has "$SHIM_LOG" "-p torrent-stack pull"
 check "update: containers recreated through compose.sh" has "$SHIM_LOG" "-p torrent-stack up -d"
 check "update: compose.sh recorded the update" has "$CM_STACK/last_result.json" '"operation":"update"'
+chmod 777 /mnt/user/downloads
+# As the old installer left it, if --update ran with that old installer.
+chmod 755 "$STACK_DIR/appdata/filebrowser"
+run_installer apply-777 -- --apply
+check "--apply: a downloads folder open to everyone (777) keeps that, only setgid is added (2777)" \
+  bash -c "[[ \$(cat '$FAKE/logs/apply-777.rc') == 0 && \$(stat -c %a /mnt/user/downloads) == 2777 ]]"
+check "--apply: an old install's 755 FileBrowser folder becomes 2775" mode_is "$STACK_DIR/appdata/filebrowser" 2775
 
 # ---------------------------------------------------------------------------
 echo "* --uninstall"

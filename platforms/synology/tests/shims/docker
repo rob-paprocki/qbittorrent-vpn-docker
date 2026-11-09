@@ -15,12 +15,15 @@ just enough of what platforms/synology/install.sh and boot.sh use:
   * `ps`, `inspect`, `info`, `version`, `image inspect`, `pull`, `rm`;
   * `run` for the two throwaway containers install.sh starts: the seeding
     container runs the repository's seeding CLI with the system python3
-    (no pip, .env mounted read-only, only the jackett and qbit seeders),
-    and the write check runs its shell snippet as the given uid:gid
-    (setpriv). Both check that the folders they need are mounted at the same
-    path, as install.sh's real `docker run` relies on;
-  * `logs` for FileBrowser prints the first-run password line the real
-    image logs (FAKE_DOCKER_DIR/fb-password, default fb-first-run-pw).
+    (no pip, .env mounted read-only, only the jackett and qbit seeders,
+    the search plugin pointed at Jackett's in-network port 9117), and the
+    write check runs its shell snippet as the given uid:gid plus any
+    --group-add group (setpriv), as qBittorrent and as FileBrowser. Both
+    check that the folders they need are mounted at the same path, as
+    install.sh's real `docker run` relies on.
+
+There is no `logs`: install.sh has no reason to read a container's log
+(FileBrowser's admin password comes from .env), so a call fails loudly.
 
 Every call is appended to $FAKE_DOCKER_DIR/calls.log. Test-only commands:
 `docker __fake restart-gluetun | fail-apps | stop-all | kill-all`.
@@ -311,6 +314,7 @@ def inspect(args):
 
 def run(args):
     i, mounts, user, image, network, entrypoint = 0, [], None, None, None, None
+    group_add = []
     while i < len(args):
         a = args[i]
         if a == "--rm":
@@ -328,6 +332,9 @@ def run(args):
             i += 2
         elif a == "--user":
             user = args[i + 1]
+            i += 2
+        elif a == "--group-add":
+            group_add.append(args[i + 1])
             i += 2
         elif a.startswith("-"):
             sys.stderr.write(f"fake docker run: unsupported option {a}\n")
@@ -355,6 +362,11 @@ def run(args):
         if rest[rest.index("--only") + 1] != "jackett,qbit":
             sys.stderr.write("fake docker run: only the jackett and qbit seeders are expected\n")
             return 1
+        # Jackett listens on 9117 inside Gluetun's network, whatever
+        # JACKETT_PORT (the port on the NAS) is.
+        if "--jackett-port" not in rest or rest[rest.index("--jackett-port") + 1] != "9117":
+            sys.stderr.write("fake docker run: the seeding CLI should get --jackett-port 9117\n")
+            return 1
         if not any(cli.startswith(d + "/") for d in same_path):
             sys.stderr.write(f"fake docker run: {cli} is not mounted at the same path\n")
             return 1
@@ -371,7 +383,11 @@ def run(args):
                 sys.stderr.write(f"fake docker run: {d} is not mounted at the same path\n")
                 return 1
         uid, _, gid = user.partition(":")
-        return subprocess.run(["setpriv", f"--reuid={uid}", f"--regid={gid}", "--clear-groups",
+        if not (uid.isdigit() and gid.isdigit()) or not all(g.isdigit() for g in group_add):
+            sys.stderr.write(f"fake docker run: numeric --user uid:gid and --group-add expected, got {user} {group_add}\n")
+            return 1
+        groups = [f"--groups={','.join(group_add)}"] if group_add else ["--clear-groups"]
+        return subprocess.run(["setpriv", f"--reuid={uid}", f"--regid={gid}", *groups,
                                "/bin/sh", "-c", rest[1], *rest[2:]]).returncode
     sys.stderr.write("fake docker run: unexpected container\n")
     return 2
@@ -433,23 +449,6 @@ def main():
     if cmd == "run":
         return run(rest)
     if cmd == "rm":
-        return 0
-    if cmd == "logs":
-        st = load()
-        c = next((c for c in st["containers"].values()
-                  if c["id"].startswith(rest[-1]) or c["name"] == rest[-1]), None)
-        if c is None:
-            sys.stderr.write(f"Error: No such container: {rest[-1]}\n")
-            return 1
-        if c["service"] == "filebrowser" and not flag("fb-no-password"):
-            try:
-                with open(os.path.join(STATE_DIR, "fb-password"), encoding="utf-8") as fh:
-                    pw = fh.read().strip()
-            except FileNotFoundError:
-                pw = "fb-first-run-pw"
-            # The exact line FileBrowser v2.0.2-stable logs.
-            print('2026/11/08 21:12:43 [INFO ] write.go:94: Generated initial admin password for user '
-                  '"admin" (set auth.adminPassword in config to override on future resets): ' + pw)
         return 0
     if cmd == "image" and rest[:1] == ["inspect"]:
         return 0 if rest[1] in load()["images"] else 1

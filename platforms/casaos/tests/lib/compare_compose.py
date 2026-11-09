@@ -21,9 +21,11 @@ CasaOS rendering makes on purpose:
     lands, both sides are equal and nothing needs allowing). Reported as a
     note so it stays visible.
 
-Jackett's and FlareSolverr's container ports (always 9117 and 8191 in the
-rendering) only differ from compose.yaml when JACKETT_PORT or
-FLARESOLVERR_PORT are changed; the tests compare with the default ports.
+Everything else must be equal, FileBrowser's database path, admin password
+and extra group (group_add: PGID) included. Jackett and FlareSolverr are
+published as JACKETT_PORT:9117 and FLARESOLVERR_PORT:8191 on both sides, so
+the tests also compare with non-default host ports and a PGID other than
+1000.
 
 usage: compare_compose.py RENDERED COMPOSE_YAML ENV_FILE PROJECT_DIR
                           [--profile watchtower] [--no-ipv6-sysctl]

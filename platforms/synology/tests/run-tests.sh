@@ -168,11 +168,19 @@ EOF
       [[ "$(readlink "/proc/$(pid_of "$s")/ns/net")" == "$g" ]] || return 1
     done
   }
-  envv() { # KEY: the value docker compose reads from the project's .env
+  envv() { # KEY [SERVICE]: the value docker compose reads from the project's .env
     # (`config` prints a literal $ as $$ so its output stays loadable.)
     (cd "$STACK_DIR" && /opt/real-compose/docker-compose config --format json 2>/dev/null) |
-      jq -r --arg k "$1" '.services.gluetun.environment[$k] // empty | gsub("\\$\\$"; "$")'
+      jq -r --arg k "$1" --arg s "${2:-gluetun}" '.services[$s].environment[$k] // empty | gsub("\\$\\$"; "$")'
   }
+  cq() { # JQ: query the project as docker compose renders it (implicit .env)
+    (cd "$STACK_DIR" && /opt/real-compose/docker-compose config --format json 2>/dev/null) | jq -r "$1"
+  }
+  published() { # the ports gluetun publishes, as "HOST:CONTAINER" lines, sorted
+    cq '.services.gluetun.ports[] | "\(.published):\(.target)"' | sort | tr '\n' ' '
+  }
+  plugin_url() { jq -r .url "$STACK_DIR/configs/qbittorrent/qBittorrent/nova3/engines/jackett.json"; }
+  perm_is() { [[ "$(stat -c '%a %u:%g' "$1")" == "$2" ]]; } # FILE "MODE UID:GID"
   pbkdf2_ok() { # PASSWORD: qBittorrent.conf's hash matches it
     python3 -I - "$1" "$STACK_DIR/configs/qbittorrent/qBittorrent/qBittorrent.conf" <<'PY'
 import base64, hashlib, re, sys
@@ -238,6 +246,10 @@ PY
   check "dry run: shows the boot task request" has "$LOGS/dry.log" "api=SYNO.Core.EventScheduler method=create"
   check "dry run: boot task runs the project folder's boot.sh" has "$LOGS/dry.log" 'f=/volume1/docker/torrent-stack/platforms/synology/boot.sh'
   check "dry run: masks secrets in the .env preview" has "$LOGS/dry.log" "QBITTORRENT_PASSWORD=********"
+  check "dry run: shows FileBrowser's folder mode" has "$LOGS/dry.log" "would run: chmod 2775 /volume1/docker/torrent-stack/configs/filebrowser"
+  check "dry run: no chmod of the downloads" hasnt "$LOGS/dry.log" "chmod 2775 /volume1/downloads"
+  check "dry run: seeding points the search plugin at port 9117" bash -c "grep 'would run: python3 -I' '$LOGS/dry.log' | grep -qF -- '--jackett-port 9117'"
+  check "dry run: shows FileBrowser's write check" has "$LOGS/dry.log" "would check that FileBrowser (uid 1000, group 100) can write to /volume1/docker/torrent-stack/configs/filebrowser /volume1/downloads"
   check "dry run: created no project folder" test ! -e "$STACK_DIR"
   check "dry run: no DSM write requests" test "$(($(syno_count SYNO.Docker.Project create) + $(syno_count SYNO.Core.EventScheduler create)))" -eq 0
   check "dry run: no containers started or run" bash -c "! tail -n +$((n0 + 1)) $FD/calls.log | grep -E ' up | run '"
@@ -260,6 +272,17 @@ PY
   check "fresh: seeded with DSM's python3" has "$LOGS/fresh.log" "Seeding qBittorrent and Jackett (DSM's python3)"
   check "fresh: no seeding container was run" bash -c "! grep -q 'torrent-stack-seed' $FD/calls.log"
   check "fresh: no FileBrowser settings.yaml (the image never reads it)" test ! -e "$STACK_DIR/configs/filebrowser/settings.yaml"
+  check "fresh: FileBrowser folder is 1026:100, group-writable and setgid (2775)" perm_is "$STACK_DIR/configs/filebrowser" "2775 1026:100"
+  check "fresh: FileBrowser's admin password is the qBittorrent password (rendered)" test "$(envv FILEBROWSER_ADMIN_PASSWORD filebrowser)" == "$(envv QBITTORRENT_PASSWORD)"
+  check "fresh: FileBrowser's database is in its mounted config folder (rendered)" test "$(envv FILEBROWSER_DATABASE_PATH filebrowser)" == /config/database.sqlite
+  check "fresh: /config is configs/filebrowser (rendered)" test "$(cq '.services.filebrowser.volumes[] | select(.target == "/config") | .source')" == "$STACK_DIR/configs/filebrowser"
+  check "fresh: FileBrowser gets the PGID group 100 (rendered group_add)" test "$(cq '.services.filebrowser.group_add | join(",")')" == 100
+  check "fresh: published ports (rendered)" test "$(published)" == "8090:8090 8191:8191 9117:9117 "
+  check "fresh: search plugin points at Jackett inside Gluetun's network" test "$(plugin_url)" == "http://127.0.0.1:9117"
+  check "fresh: downloads folders keep their mode (not chmod'ed)" bash -c "test \"\$(stat -c %a /volume1/downloads) \$(stat -c %a /volume1/downloads/incomplete)\" == '755 755'"
+  check "fresh: FileBrowser write check: its config folder is fine" hasnt "$LOGS/fresh.log" "cannot write to its folder"
+  check "fresh: FileBrowser write check: names the downloads it cannot change" has "$LOGS/fresh.log" "FileBrowser (uid 1000, group users) cannot change files in /volume1/downloads."
+  check "fresh: FileBrowser write check: says how to allow it in DSM" has "$LOGS/fresh.log" "Local groups > users > Read/Write > Save."
   check "fresh: Jackett API key" bash -c "jq -e '.APIKey | length == 32' $STACK_DIR/configs/jackett/Jackett/ServerConfig.json >/dev/null"
   check "fresh: Jackett search plugin installed" test -s "$STACK_DIR/configs/qbittorrent/qBittorrent/nova3/engines/jackett.py"
   check "fresh: qBittorrent config owned 1026:100" owner_is "$STACK_DIR/configs/qbittorrent/qBittorrent/qBittorrent.conf" 1026:100
@@ -280,7 +303,8 @@ PY
   check "fresh: not started without VPN keys" bash -c "! grep -q ' up ' $FD/calls.log"
   check "fresh: says so" has "$LOGS/fresh.log" "Not started: the VPN keys are not set yet"
   check "fresh: prints the generated password" has "$LOGS/fresh.log" "Generated password"
-  check "fresh: says where FileBrowser's first-run password will be" has "$LOGS/fresh.log" "the first-run password in its log, once it runs"
+  check "fresh: FileBrowser login is admin with the qBittorrent password" has "$LOGS/fresh.log" "FileBrowser login:     admin / the same password (QBITTORRENT_PASSWORD)"
+  check "fresh: no talk of a first-run password" hasnt "$LOGS/fresh.log" "first-run"
   check "fresh: explains Container Manager" has "$LOGS/fresh.log" "Container Manager > Project > torrent-stack"
 
   echo "== re-run with VPN keys and a password with special characters"
@@ -297,7 +321,9 @@ PY
   check "keys: compose reads the WireGuard key back exactly" test "$(envv WIREGUARD_PRIVATE_KEY)" == "$WG"
   check "keys: compose reads the password back exactly" test "$(envv QBITTORRENT_PASSWORD)" == "$QPW"
   check "keys: qBittorrent hash matches the new password" pbkdf2_ok "$QPW"
-  check "keys: prints FileBrowser's first-run password from its log" has "$LOGS/keys.log" "admin / fb-first-run-pw  (first-run password"
+  check "keys: FileBrowser's admin password is the new password exactly (rendered)" test "$(envv FILEBROWSER_ADMIN_PASSWORD filebrowser)" == "$QPW"
+  check "keys: no container log was read" bash -c "! grep -qE '^docker(-compose)? logs' $FD/calls.log"
+  check "keys: FileBrowser login line" has "$LOGS/keys.log" "FileBrowser login:     admin / the same password (QBITTORRENT_PASSWORD)"
   check "keys: qBittorrent login line" has "$LOGS/keys.log" "admin / QBITTORRENT_PASSWORD in /volume1/docker/torrent-stack/.env"
   check "keys: no 'Login (both)' claim" hasnt "$LOGS/keys.log" "Login (both)"
   check "keys: previous .env kept as .env.bak (600)" mode_is "$STACK_DIR/.env.bak" 600
@@ -337,6 +363,64 @@ PY
   # current gluetun network; Jackett and FlareSolverr need recreating.
   check "stale: --apply recreates the apps still outside" bash -c "tail -n +$((n0 + 1)) $FD/calls.log | grep -q 'up -d --no-deps --force-recreate jackett flaresolverr$'"
   check "stale: apps back inside gluetun's network" netns_ok
+
+  echo "== ports on the NAS"
+  inst ports TS_JACKETT_PORT=19117 TS_FLARESOLVERR_PORT=18191 TS_FILEBROWSER_PORT=18081 -- --unattended
+  check "ports: other Jackett, FlareSolverr and FileBrowser ports: exit 0" test "$RC" -eq 0
+  check "ports: written to .env" bash -c "grep -qx JACKETT_PORT=19117 $STACK_DIR/.env && grep -qx FLARESOLVERR_PORT=18191 $STACK_DIR/.env && grep -qx FILEBROWSER_PORT=18081 $STACK_DIR/.env"
+  check "ports: published to the apps' fixed ports inside Gluetun's network (rendered)" test "$(published)" == "18191:8191 19117:9117 8090:8090 "
+  check "ports: FileBrowser published to its port 80 (rendered)" test "$(cq '.services.filebrowser.ports[] | "\(.published):\(.target)"')" == "18081:80"
+  check "ports: search plugin still points at 127.0.0.1:9117" test "$(plugin_url)" == "http://127.0.0.1:9117"
+  check "ports: printed Jackett and FileBrowser addresses use the NAS ports" bash -c "grep -q 'Jackett: .*:19117\$' '$LOGS/ports.log' && grep -q 'FileBrowser: .*:18081\$' '$LOGS/ports.log'"
+  check "ports: all five services running" test "$(running_count)" -eq 5
+  inst ports-dup TS_JACKETT_PORT=8090 -- --unattended
+  check "ports: two web UIs on one NAS port: refused" has "$LOGS/ports-dup.log" "JACKETT_PORT and QBIT_WEBUI_PORT are both 8090"
+  check "ports: the refused run changed nothing" envfile_has "JACKETT_PORT=19117"
+  inst ports-qbit TS_QBIT_WEBUI_PORT=9117 -- --unattended
+  check "ports: QBIT_WEBUI_PORT 9117 (Jackett's port inside Gluetun's network): refused" has "$LOGS/ports-qbit.log" "QBIT_WEBUI_PORT cannot be 9117"
+  sed -i 's/^FLARESOLVERR_PORT=.*/FLARESOLVERR_PORT=19117/' "$STACK_DIR/.env"
+  inst ports-apply -- --apply
+  check "ports: --apply refuses a hand-edited duplicate" has "$LOGS/ports-apply.log" "FLARESOLVERR_PORT and JACKETT_PORT are both 19117"
+  sed -i 's/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD=short/' "$STACK_DIR/.env"
+  inst ports-shortpw -- --apply
+  check "--apply refuses a password under 8 characters (FileBrowser's too)" has "$LOGS/ports-shortpw.log" "must be at least 8 characters (it is also FileBrowser's admin password)"
+  sed -i "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD='An0ther \"pw\" here'/" "$STACK_DIR/.env"
+  inst ports-back TS_JACKETT_PORT=9117 TS_FLARESOLVERR_PORT=8191 TS_FILEBROWSER_PORT=8081 -- --unattended
+  check "ports: back to the defaults" test "$(published)" == "8090:8090 8191:8191 9117:9117 "
+
+  echo "== FileBrowser's folder and the downloads"
+  # What FileBrowser leaves there: its database, owned by its own uid 1000,
+  # group 100 (the folder is setgid), mode 644.
+  install -o 1000 -g 100 -m 644 /dev/null "$STACK_DIR/configs/filebrowser/database.sqlite"
+  chmod 755 "$STACK_DIR/configs/filebrowser"
+  inst fbfiles -- --apply
+  check "--apply: FileBrowser's database keeps its owner, uid 1000 (no chown -R)" perm_is "$STACK_DIR/configs/filebrowser/database.sqlite" "644 1000:100"
+  check "--apply: FileBrowser's folder is 2775 again" perm_is "$STACK_DIR/configs/filebrowser" "2775 1026:100"
+  check "--apply: runs the write checks again" has "$LOGS/fbfiles.log" "alice can write to the config and download folders"
+  # On DSM: Read/Write for the users group on the downloads shared folder.
+  # Plain group write stands in for that here.
+  chmod 775 /volume1/downloads
+  inst fbgroup -- --apply
+  chmod 755 /volume1/downloads
+  check "group write on the downloads: FileBrowser's check passes" has "$LOGS/fbgroup.log" "FileBrowser (uid 1000, group users) can write to its config folder and the downloads"
+  check "group write on the downloads: no warning" hasnt "$LOGS/fbgroup.log" "cannot change files in"
+  # Something the apps can write to put a symlink where a folder was: root
+  # must not chown or chmod what it points to.
+  mkdir -p /root/fbtarget /root/inctarget
+  chmod 755 /root/fbtarget /root/inctarget
+  mv "$STACK_DIR/configs/filebrowser" /root/fb.saved
+  ln -s /root/fbtarget "$STACK_DIR/configs/filebrowser"
+  mv /volume1/downloads/incomplete /root/inc.saved
+  ln -s /root/inctarget /volume1/downloads/incomplete
+  inst links -- --apply
+  check "symlinked FileBrowser folder: its target is not chowned or chmod'ed" perm_is /root/fbtarget "755 0:0"
+  check "symlinked incomplete/: its target is not chowned (chown -h)" perm_is /root/inctarget "755 0:0"
+  check "symlinked FileBrowser folder: warns that FileBrowser cannot write it" has "$LOGS/links.log" "cannot write to its folder $STACK_DIR/configs/filebrowser"
+  rm -f "$STACK_DIR/configs/filebrowser" /volume1/downloads/incomplete
+  mv /root/fb.saved "$STACK_DIR/configs/filebrowser"
+  mv /root/inc.saved /volume1/downloads/incomplete
+  inst links-back -- --apply
+  check "folders put back: --apply exit 0" test "$RC" -eq 0
 
   echo "== boot.sh"
   tun_off
@@ -429,6 +513,7 @@ PY
   check "python3 fails: falls back to the seeding container" has "$LOGS/seedcontainer.log" "trying the throwaway python:3.14.9-slim-trixie container"
   check "seeding container: .env mounted read-only" bash -c "tail -n +$((n0 + 1)) $FD/calls.log | grep 'torrent-stack-seed' | grep -qF -- '-v $STACK_DIR/.env:$STACK_DIR/.env:ro'"
   check "seeding container: jackett and qbit seeders only, nothing installed" bash -c "tail -n +$((n0 + 1)) $FD/calls.log | grep 'torrent-stack-seed' | grep -F -- '--only jackett,qbit' | grep -qv pip"
+  check "seeding container: search plugin pointed at Jackett's in-network port" bash -c "tail -n +$((n0 + 1)) $FD/calls.log | grep 'torrent-stack-seed' | grep -qF -- '--jackett-port 9117'"
   check "seeding container: qBittorrent hash matches" pbkdf2_ok "$(envv QBITTORRENT_PASSWORD)"
   touch "$FD/fail-seed"
   inst seedfail PATH="/root/badpy:$PATH" -- --unattended
@@ -457,9 +542,13 @@ PY
   check "update dry run: says what it would do" has "$LOGS/update-dry.log" "would update the stack 'torrent-stack'"
   check "update dry run: project folder unchanged" cmp -s /root/compose.saved "$STACK_DIR/compose.yaml"
   check "update dry run: no update request sent" test "$(syno_count SYNO.Docker.Project update)" -eq 0
+  # As left by an install from before FileBrowser kept its database there.
+  chmod 755 "$STACK_DIR/configs/filebrowser"
   n0=$(ncalls)
   inst update -- --update
   check "update: exit 0" test "$RC" -eq 0
+  check "update: FileBrowser's folder set up for the new compose.yaml (2775)" perm_is "$STACK_DIR/configs/filebrowser" "2775 1026:100"
+  check "update: says where FileBrowser's users are kept" has "$LOGS/update.log" "FileBrowser's users and settings are kept in $STACK_DIR/configs/filebrowser"
   check "update: new compose.yaml copied" cmp -s "$SRC/compose.yaml" "$STACK_DIR/compose.yaml"
   check "update: Container Manager project updated" test "$(syno_count SYNO.Docker.Project update)" -eq 1
   check "update: .env kept" cmp -s /root/env.saved "$STACK_DIR/.env"
@@ -521,6 +610,8 @@ PY
   check "no write access: names the folder" has "$LOGS/perms.log" "         /volume1/downloads/torrents"
   check "no write access: explains the DSM permission" has "$LOGS/perms.log" "Control Panel > Shared Folder"
   check "no write access: names the shared folder" has "$LOGS/perms.log" "Read/Write on the shared folder(s): downloads"
+  check "no write access: FileBrowser's warning names the folder" has "$LOGS/perms.log" "cannot change files in /volume1/downloads/torrents."
+  check "no write access: FileBrowser's warning names the shared folder" has "$LOGS/perms.log" "Control Panel > Shared Folder > select downloads > Edit > Permissions >"
 
   echo "== folders that overlap, and unusual folder names"
   reset_all
@@ -844,11 +935,16 @@ if [[ "$REAL_DOCKER" == 1 ]]; then
   D="$WORK/volume1/docker/torrent-stack"
   mkdir -p "$D/configs"
   tar -C "$D" -xf "$SRC_TAR"
+  # JACKETT_PORT is only the port on the NAS: the search plugin must still
+  # reach Jackett on 9117 inside Gluetun's network.
   sed -e "s#^CONFIG_PATH=.*#CONFIG_PATH=$D/configs#" -e 's/^QBITTORRENT_USER=.*/QBITTORRENT_USER=admin/' \
-    -e "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD='real docker pw'/" "$REPO/.env.example" >"$D/.env"
+    -e "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD='real docker pw'/" -e 's/^JACKETT_PORT=.*/JACKETT_PORT=19117/' \
+    "$REPO/.env.example" >"$D/.env"
   chmod 600 "$D/.env"
+  JACKETT_INNER_PORT=$(sed -n 's/^readonly JACKETT_INNER_PORT=\([0-9]*\)$/\1/p' "$REPO/platforms/synology/install.sh")
+  check "install.sh points the search plugin at Jackett's port 9117" test "$JACKETT_INNER_PORT" == 9117
   # shellcheck disable=SC2016  # literal text in install.sh
-  check "install.sh runs the seeding container the way it is run here" bash -c "grep -qF -- '--entrypoint python3 \"\$SEED_IMAGE\"' \"\$1\" && grep -qF -- '-v \"\${STACK_DIR}:\${STACK_DIR}:ro\" -v \"\${ENV_FILE}:\${ENV_FILE}:ro\" -v \"\${CONFIG_PATH}:\${CONFIG_PATH}\"' \"\$1\" && grep -qF -- '-I \"\$cli\" --env \"\$ENV_FILE\" --only \"\$SEEDERS\" --as-user \"\${PUID}:\${PGID}\"' \"\$1\"" _ "$REPO/platforms/synology/install.sh"
+  check "install.sh runs the seeding container the way it is run here" bash -c "grep -qF -- '--entrypoint python3 \"\$SEED_IMAGE\"' \"\$1\" && grep -qF -- '-v \"\${STACK_DIR}:\${STACK_DIR}:ro\" -v \"\${ENV_FILE}:\${ENV_FILE}:ro\" -v \"\${CONFIG_PATH}:\${CONFIG_PATH}\"' \"\$1\" && grep -qF -- '-I \"\$cli\" --env \"\$ENV_FILE\" --only \"\$SEEDERS\" --as-user \"\${PUID}:\${PGID}\" --jackett-port \"\$JACKETT_INNER_PORT\"' \"\$1\"" _ "$REPO/platforms/synology/install.sh"
   # --network host only because this test host's Docker has no bridge
   # networking (dockerd --iptables=false); install.sh uses the default.
   CA_ARGS=()
@@ -860,7 +956,7 @@ if [[ "$REAL_DOCKER" == 1 ]]; then
   chown -R 1026:100 "$D/configs"
   if docker run --rm --network host ${CA_ARGS[@]+"${CA_ARGS[@]}"} -v "$D:$D:ro" -v "$D/.env:$D/.env:ro" -v "$D/configs:$D/configs" \
     --entrypoint python3 "$SEED_IMAGE" -I "$D/scripts/env-editor/seed_configs.py" --env "$D/.env" --only "$SEEDERS" \
-    --as-user 1026:100 >"$WORK/seed.log" 2>&1; then
+    --as-user 1026:100 --jackett-port "$JACKETT_INNER_PORT" >"$WORK/seed.log" 2>&1; then
     ok "real seeding container ($SEED_IMAGE, nothing installed) ran the seeding CLI"
   else
     bad "real seeding container failed: $(tail -n 5 "$WORK/seed.log" | tr '\n' ' ')"
@@ -875,6 +971,7 @@ PY
   check "real seeding: qBittorrent hash matches the password" python3 -I "$WORK/pbkdf2.py" "$D/configs/qbittorrent/qBittorrent/qBittorrent.conf" "real docker pw"
   check "real seeding: Jackett API key written" grep -qE '"APIKey": "[a-z0-9]{32}"' "$D/configs/jackett/Jackett/ServerConfig.json"
   check "real seeding: search plugin downloaded" test -s "$D/configs/qbittorrent/qBittorrent/nova3/engines/jackett.py"
+  check "real seeding: search plugin points at 127.0.0.1:9117 although JACKETT_PORT=19117" test "$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["url"])' "$D/configs/qbittorrent/qBittorrent/nova3/engines/jackett.json")" == "http://127.0.0.1:9117"
   check "real seeding: no FileBrowser file written" test ! -e "$D/configs/filebrowser/settings.yaml"
   check "real seeding: files written as PUID:PGID, not root" test "$(stat -c %u:%g "$D/configs/qbittorrent/qBittorrent/qBittorrent.conf")" == 1026:100
   check "real seeding: search plugin is the pinned one" test "$(sha256sum <"$D/configs/qbittorrent/qBittorrent/nova3/engines/jackett.py" | cut -d' ' -f1)" == "$(sed -n 's/^QBIT_JACKETT_PLUGIN_SHA256=//p' "$REPO/native/versions.env")"
@@ -883,37 +980,87 @@ PY
   if have_image "$PY38_IMAGE"; then
     # The plugin is already there, so no network is needed.
     check "seeding CLI runs on Python 3.8 (DSM 7's python3)" bash -c 'docker run --rm --network none -v "$1:$1:ro" -v "$1/.env:$1/.env:ro" -v "$1/configs:$1/configs" \
-      --entrypoint python3 "$2" -I "$1/scripts/env-editor/seed_configs.py" --env "$1/.env" --only "$3" --as-user 1026:100 >/dev/null' _ "$D" "$PY38_IMAGE" "$SEEDERS"
+      --entrypoint python3 "$2" -I "$1/scripts/env-editor/seed_configs.py" --env "$1/.env" --only "$3" --as-user 1026:100 --jackett-port 9117 >/dev/null' _ "$D" "$PY38_IMAGE" "$SEEDERS"
     check "Python 3.8: qBittorrent hash matches" python3 -I "$WORK/pbkdf2.py" "$D/configs/qbittorrent/qBittorrent/qBittorrent.conf" "real docker pw"
   else
     echo "  skip seeding CLI on Python 3.8 ($PY38_IMAGE could not be pulled)"
   fi
 
   if [[ -n "$FB_IMAGE" ]] && have_image "$FB_IMAGE"; then
-    # FileBrowser as compose.yaml runs it on DSM: /config and the downloads
-    # owned by the DSM user (1026:100). No network: only its own port, via
-    # docker exec.
-    FBD="$WORK/fb"
-    mkdir -p "$FBD/config" "$FBD/dl"
-    chown 1026:100 "$FBD/config" "$FBD/dl"
-    docker rm -f synology-fb-test >/dev/null 2>&1 || true
-    docker run -d --name synology-fb-test --network none -v "$FBD/config:/config" -v "$FBD/dl:/srv/downloads" "$FB_IMAGE" >/dev/null
-    # install.sh's own function reads the password from the log.
-    container_of() { echo synology-fb-test; }
-    eval "$(sed -n '/^filebrowser_password() {/,/^}/p' "$REPO/platforms/synology/install.sh")"
-    FB_PW=""
-    for _ in $(seq 30); do
-      FB_PW=$(filebrowser_password)
-      [[ -n "$FB_PW" ]] && break
-      sleep 1
-    done
-    check "real FileBrowser ($FB_IMAGE): install.sh finds the first-run password in its log" test -n "$FB_PW"
-    fb_login() { docker exec synology-fb-test curl -s -X POST 'http://127.0.0.1:80/api/auth/login?username=admin' -H "X-Password: $1"; }
-    check "real FileBrowser: that password is accepted (it asks for a new one)" bash -c "grep -q 'password change is required' <<<\"\$1\"" _ "$(fb_login "$FB_PW")"
-    check "real FileBrowser: a wrong password is refused" bash -c "grep -q '\"status\":401' <<<\"\$1\"" _ "$(fb_login wrong-password)"
-    check "real FileBrowser: it reads its settings from /home/filebrowser/data, not /config" bash -c "docker logs synology-fb-test 2>&1 | grep -q 'Using Config file *: /home/filebrowser/data/config.yaml'"
-    check "real FileBrowser: it cannot write the DSM user's downloads (read-only on DSM)" bash -c '! docker exec synology-fb-test touch /srv/downloads/x 2>/dev/null'
-    docker rm -f synology-fb-test >/dev/null 2>&1 || true
+    # FileBrowser from the repository's own compose.yaml, with an .env as
+    # install.sh writes it on DSM (PUID 1026, PGID 100, a password with
+    # spaces, quotes, a backslash and $) and its folders prepared by
+    # install.sh's own fix_ownership. The override only takes away its
+    # network and published port (this test host's Docker has no bridge
+    # networking); it is reached with docker exec.
+    DL="$WORK/volume1/downloads"
+    mkdir -p "$D/configs/filebrowser" "$DL/incomplete"
+    FBPW='sp ace "q" \b$x'
+    sed -e "s#^CONFIG_PATH=.*#CONFIG_PATH=$D/configs#" -e "s#^DOWNLOADS_PATH=.*#DOWNLOADS_PATH=$DL#" \
+      -e "s#^INCOMPLETE_DOWNLOADS=.*#INCOMPLETE_DOWNLOADS=$DL/incomplete#" -e 's/^PUID=.*/PUID=1026/' -e 's/^PGID=.*/PGID=100/' \
+      -e 's/^QBITTORRENT_USER=.*/QBITTORRENT_USER=admin/' "$REPO/.env.example" >"$D/fb.env"
+    # Single quotes, as install.sh's env_quote writes this password.
+    sed -i "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD='sp ace \"q\" \\\\b\$x'/" "$D/fb.env"
+    chmod 600 "$D/fb.env"
+    printf 'services:\n  filebrowser:\n    network_mode: none\n    ports: !reset []\n' >"$WORK/fb-override.yaml"
+    FBP=(docker compose -p synology-fb-test -f "$D/compose.yaml" -f "$WORK/fb-override.yaml" --env-file "$D/fb.env")
+    FBC=synology-fb-test-filebrowser-1
+    check "real compose: FileBrowser gets the password exactly as written" test "$("${FBP[@]}" config --format json | jq -r '.services.filebrowser.environment.FILEBROWSER_ADMIN_PASSWORD | gsub("\\$\\$"; "$")')" == "$FBPW"
+    # install.sh's own functions.
+    eval "$(sed -n -e '/^run() {/,/^}/p' -e '/^fix_ownership() {/,/^}/p' -e '/^write_test() {/,/^}/p' "$REPO/platforms/synology/install.sh")"
+    # shellcheck disable=SC2034  # read by the functions above
+    DRY_RUN=0 CONFIG_PATH="$D/configs" DOWNLOADS="$DL" PUID=1026 PGID=100 TEMP_DIR="$WORK"
+    fix_ownership
+    check "install.sh's fix_ownership: FileBrowser folder 2775, 1026:100" test "$(stat -c '%a %u:%g' "$D/configs/filebrowser")" == "2775 1026:100"
+    check "install.sh's fix_ownership: downloads 1026:100, mode left alone" test "$(stat -c '%a %u:%g' "$DL")" == "755 1026:100"
+    enc() { python3 -I -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
+    fb_login() { docker exec "$FBC" curl -s -X POST "http://127.0.0.1:80/api/auth/login?username=$1" -H "X-Password: $(enc "$2")"; }
+    fb_code() { docker exec "$FBC" curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:80/api/auth/login?username=$1" -H "X-Password: $(enc "$2")" 2>/dev/null; }
+    fb_wait() { for _ in $(seq 60); do [[ "$(fb_code admin x)" == 401 ]] && return 0; sleep 1; done; return 1; }
+    fb_api() { # METHOD PATH JSON: an API call as admin; prints the HTTP status
+      local t
+      t=$(fb_login admin "$FBPW")
+      docker exec "$FBC" curl -s -o /dev/null -w '%{http_code}' -X "$1" "http://127.0.0.1:80$2" -H "Authorization: Bearer $t" \
+        -H "X-Password: $(enc "$FBPW")" -H 'Content-Type: application/json' -d "$3"
+    }
+    "${FBP[@]}" up -d filebrowser >"$WORK/fb-up.log" 2>&1 || cat "$WORK/fb-up.log"
+    check "real FileBrowser ($FB_IMAGE) from compose.yaml: starts and answers" fb_wait
+    check "real FileBrowser: admin + the qBittorrent password logs in" test "$(fb_code admin "$FBPW")" == 200
+    check "real FileBrowser: no password change demanded (it is not a first-run password)" bash -c "! grep -q 'password change is required' <<<\"\$1\"" _ "$(fb_login admin "$FBPW")"
+    check "real FileBrowser: a wrong password is refused" test "$(fb_code admin wrong-password)" == 401
+    check "real FileBrowser: log says it took FILEBROWSER_ADMIN_PASSWORD" bash -c "docker logs $FBC 2>&1 | grep -q 'Using admin password from FILEBROWSER_ADMIN_PASSWORD environment variable'"
+    check "real FileBrowser: no generated first-run password" bash -c "! docker logs $FBC 2>&1 | grep -q 'Generated initial admin password'"
+    check "real FileBrowser: database in configs/filebrowser, owned by its uid 1000, group 100" test "$(stat -c '%u:%g' "$D/configs/filebrowser/database.sqlite" 2>/dev/null)" == 1000:100
+    check "real FileBrowser: a second user can be added" test "$(fb_api POST /api/users '{"which":[],"data":{"username":"family","password":"family-pw-123","loginMethod":"password"}}')" == 201
+    check "real FileBrowser: admin password changed in FileBrowser itself" test "$(fb_api PATCH '/api/users?username=admin' '{"which":["password"],"data":{"password":"changed-in-ui-1"}}')" == 204
+    docker restart "$FBC" >/dev/null
+    fb_wait || true
+    check "real FileBrowser, restarted: the qBittorrent password is back" test "$(fb_code admin "$FBPW")" == 200
+    check "real FileBrowser, restarted: the password set in FileBrowser no longer works" test "$(fb_code admin changed-in-ui-1)" == 401
+    check "real FileBrowser, restarted: the second user is kept" test "$(fb_code family family-pw-123)" == 200
+    # As --apply and --update do, then a recreate (as --update, or Clean and
+    # Build in Container Manager, do).
+    fix_ownership
+    "${FBP[@]}" up -d --force-recreate filebrowser >"$WORK/fb-up.log" 2>&1 || cat "$WORK/fb-up.log"
+    fb_wait || true
+    check "real FileBrowser, recreated: it uses the existing database" bash -c "docker logs $FBC 2>&1 | grep -q 'Using existing database  : /config/database.sqlite'"
+    check "real FileBrowser, recreated: the second user is kept" test "$(fb_code family family-pw-123)" == 200
+    check "real FileBrowser, recreated: admin logs in" test "$(fb_code admin "$FBPW")" == 200
+    check "real FileBrowser, recreated: its database stays its own (uid 1000)" test "$(stat -c '%u:%g' "$D/configs/filebrowser/database.sqlite")" == 1000:100
+    check "real FileBrowser, recreated: no read-only database errors" bash -c "! docker logs $FBC 2>&1 | grep -q 'readonly database'"
+    sed -i 's/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD=Second-pw-456/' "$D/fb.env"
+    "${FBP[@]}" up -d filebrowser >"$WORK/fb-up.log" 2>&1 || cat "$WORK/fb-up.log"
+    fb_wait || true
+    check "real FileBrowser: a new QBITTORRENT_PASSWORD is its new admin password" test "$(fb_code admin Second-pw-456)" == 200
+    check "real FileBrowser: the old one no longer works" test "$(fb_code admin "$FBPW")" == 401
+    check "real FileBrowser: id is uid 1000 with group 100 added" bash -c "docker exec $FBC id | grep -q 'uid=1000.*groups=.*100(users)'"
+    check "real FileBrowser: cannot change downloads that only their owner may write (755)" bash -c "! docker exec $FBC touch /srv/downloads/fb-test 2>/dev/null"
+    check "install.sh's FileBrowser write check (real docker) names only the downloads" test "$(write_test 1000:1000 100 "$D/configs/filebrowser" "$DL")" == "$DL"
+    # Group write: what Read/Write for the users group gives on DSM.
+    chmod 775 "$DL"
+    check "real FileBrowser: with group write it can upload into the downloads" docker exec "$FBC" touch /srv/downloads/fb-test
+    check "install.sh's FileBrowser write check (real docker) then passes" test -z "$(write_test 1000:1000 100 "$D/configs/filebrowser" "$DL")"
+    "${FBP[@]}" down >/dev/null 2>&1 || docker rm -f "$FBC" >/dev/null 2>&1 || true
   else
     echo "  skip real FileBrowser checks (${FB_IMAGE:-no image in compose.yaml} could not be pulled)"
   fi

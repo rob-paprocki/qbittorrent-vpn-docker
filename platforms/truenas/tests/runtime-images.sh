@@ -8,12 +8,16 @@
 #      TrueNAS installer seeds on a fresh install keep the image's defaults
 #      (downloads to /downloads, UPnP off) and log in with the seeded
 #      password; and a re-seeded password still works after qBittorrent has
-#      started once (5.3 moves its login to a [WebUI] section). The same
-#      re-seed without truenas_app.py's qbit-webui-fix is shown to fail.
+#      started once (5.3 moves its login to a [WebUI] section), both with
+#      and without truenas_app.py's qbit-webui-fix (the seeding CLI now
+#      writes [WebUI] itself once the file has been migrated).
 #   2. FileBrowser (ghcr.io/gtsteffaniak/filebrowser:stable), started from
-#      the filebrowser service of a YAML rendered by truenas_app.py: the
-#      admin login is the qBittorrent password, and its database survives
-#      `up --force-recreate` (what TrueNAS runs on every app update).
+#      the filebrowser service of a YAML rendered by truenas_app.py (that
+#      is compose.yaml's service), on folders with the owners and modes
+#      install.sh gives them: the admin login is the qBittorrent password,
+#      its database survives `up --force-recreate` (what TrueNAS runs on
+#      every app update), and it can create files in the downloads (owned
+#      by 568:568) through the PGID group, not without that group's access.
 # The containers get no network (--network none / network_mode: none); the
 # checks run curl inside them. Images that are not present locally are
 # skipped (pull them first: docker pull IMAGE). Nothing is pulled here.
@@ -78,7 +82,7 @@ else
     as568 python3 -I "$H" qbit-defaults --repo "$REPO" --conf "$CONF" >/dev/null
     as568 python3 -I "$H" fetch-plugin --repo "$REPO" --dest "$Q/config/qbittorrent/qBittorrent/nova3/engines/jackett.py" >/dev/null
     as568 python3 -I "$REPO/scripts/env-editor/seed_configs.py" --env "$Q/seed/seed.env" \
-      --config-root "$Q/config" --only jackett,qbit >/dev/null
+      --config-root "$Q/config" --only jackett,qbit --jackett-port 9117 >/dev/null
     if [[ "${2:-}" != --no-fix ]]; then
       as568 python3 -I "$H" qbit-webui-fix --repo "$REPO" --conf "$CONF" >/dev/null
     fi
@@ -118,7 +122,10 @@ else
 
   seed 'second-Pass-2' --no-fix
   start
-  expect "re-seed WITHOUT qbit-webui-fix: the new password is refused (the bug)" 401 "$(login 'second-Pass-2')"
+  # This used to be refused (401): the seeding CLI only wrote [Preferences].
+  # It now also writes [WebUI] in a migrated file (seed_configs.py,
+  # _qbit_conf_migrated), so qbit-webui-fix is only a tidy-up.
+  expect "re-seed WITHOUT qbit-webui-fix: the seeding CLI's own [WebUI] step makes the new password work" 204 "$(login 'second-Pass-2')"
   stop
 
   cp -p "$Q/conf.after-first-start" "$CONF"
@@ -139,8 +146,15 @@ else
   rm -rf "$F"
   mkdir -p "$F/mnt/configs/filebrowser" "$F/mnt/downloads"
   chmod 755 "$F" "$F/mnt"
+  # As install.sh leaves them (prepare_folders, create_datasets).
   chown 1000:568 "$F/mnt/configs/filebrowser"
+  chmod 2770 "$F/mnt/configs/filebrowser"
   chown 568:568 "$F/mnt/downloads"
+  chmod 2775 "$F/mnt/downloads"
+  # A finished download as qBittorrent (568:568, umask 022) leaves it.
+  echo data >"$F/mnt/downloads/done.mkv"
+  chown 568:568 "$F/mnt/downloads/done.mkv"
+  chmod 644 "$F/mnt/downloads/done.mkv"
   PW='fb-Pa$$word-1'
   printf '%s\0' "CONFIG_PATH=$F/mnt/configs" "DOWNLOADS_PATH=$F/mnt/downloads" \
     "INCOMPLETE_DOWNLOADS=$F/mnt/downloads/incomplete" QBITTORRENT_USER=admin \
@@ -168,14 +182,36 @@ PY
     docker compose -p tnrt-fb -f "$F/compose.yaml" logs 2>&1 | tail -n 20
     return 1
   }
-  fb_login() { # password -> HTTP status
+  fb_login() { # password -> HTTP status (the session cookie is kept in the container)
     docker compose -p tnrt-fb -f "$F/compose.yaml" exec -T filebrowser curl -s -o /dev/null -w '%{http_code}' \
-      -X POST 'http://127.0.0.1:80/api/auth/login?username=admin' -H "X-Password: $1"
+      -c /tmp/fb.cookies -X POST 'http://127.0.0.1:80/api/auth/login?username=admin' -H "X-Password: $1"
+  }
+  fb_api() { # method query -> HTTP status, logged in as admin (FileBrowser's only source is /srv, named srv)
+    docker compose -p tnrt-fb -f "$F/compose.yaml" exec -T filebrowser curl -s -o /dev/null -w '%{http_code}' \
+      -b /tmp/fb.cookies -X "$1" "http://127.0.0.1:80/api/resources?source=srv&$2"
   }
   fb_up
   expect "admin logs in with the qBittorrent password (with a \$ in it)" 200 "$(fb_login "$PW")"
   expect "  ... admin/admin does not" 401 "$(fb_login admin)"
   if [[ -f "$F/mnt/configs/filebrowser/database.sqlite" ]]; then ok "  ... database in the configs dataset"; else bad "  ... database in the configs dataset"; fi
+  expect "  ... its container user is uid 1000 with the extra group 568 (compose.yaml's group_add)" \
+    "uid=1000 gid=1000 groups=568,1000" \
+    "$(docker compose -p tnrt-fb -f "$F/compose.yaml" exec -T filebrowser sh -c 'echo "uid=$(id -u) gid=$(id -g) groups=$(id -G | tr " " "\n" | sort -n | paste -sd, -)"')"
+  fb_login "$PW" >/dev/null
+  expect "FileBrowser creates a folder in the downloads (568:568, 2775) through group 568" 200 \
+    "$(fb_api POST 'path=%2Fdownloads%2Ffrom-filebrowser%2F&isDir=true')"
+  expect "  ... which belongs to group 568 (setgid on the downloads)" 568 \
+    "$(stat -c %g "$F/mnt/downloads/from-filebrowser" 2>/dev/null || echo missing)"
+  expect "  ... and deletes a file qBittorrent saved there (568:568, 644)" 200 \
+    "$(fb_api DELETE 'path=%2Fdownloads%2Fdone.mkv')"
+  chmod 0755 "$F/mnt/downloads"
+  fb_api POST 'path=%2Fdownloads%2Fnot-allowed%2F&isDir=true' >/dev/null || true
+  if [[ ! -e "$F/mnt/downloads/not-allowed" ]]; then
+    ok "  ... with the downloads at 0755 (no group write) it cannot create a folder there"
+  else
+    bad "  ... with the downloads at 0755 (no group write) it cannot create a folder there"
+  fi
+  chmod 2775 "$F/mnt/downloads"
   fb_up --force-recreate
   if docker compose -p tnrt-fb -f "$F/compose.yaml" logs 2>&1 | grep -q 'Using existing database'; then
     ok "after up --force-recreate (a TrueNAS update) the database is kept"

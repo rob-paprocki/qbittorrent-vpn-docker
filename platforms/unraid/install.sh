@@ -14,6 +14,8 @@
 #   * the apps' settings go to <appdata>/torrent-stack/appdata; the
 #     qBittorrent and Jackett configs are seeded with the repo's own seeding
 #     CLI, run in a throwaway python container (Unraid has no python3);
+#     FileBrowser needs no seeding (compose.yaml gives its "admin" user the
+#     qBittorrent password), only folders it can write to;
 #   * the stack is registered with Compose Manager Plus as an "indirect"
 #     stack pointing at that folder, and started through the plugin's own
 #     compose wrapper, so the plugin's Docker > Compose page shows and manages
@@ -79,12 +81,22 @@ readonly MIN_UNRAID="6.12.0"
 # has no python3; Docker is always there. Pinned by tag and by digest (the
 # digest is what docker actually pulls), bumped by hand.
 readonly SEED_IMAGE="python:3.14.9-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8"
-# Which seeders run. FileBrowser is left out on purpose: the current
+# Which seeders run. FileBrowser is left out on purpose: compose.yaml sets
+# its "admin" password from QBITTORRENT_PASSWORD (FILEBROWSER_ADMIN_PASSWORD)
+# on every start and keeps its database in its /config folder, while the
 # FileBrowser image (ghcr.io/gtsteffaniak/filebrowser:stable, Quantum 2.x)
-# reads /home/filebrowser/data/config.yaml, not the /config/settings.yaml
-# the seeder writes, so its seed would only mislead. Leaving it out also
-# means the container needs nothing from PyPI (bcrypt is only for that seed).
+# never reads the /config/settings.yaml that seeder writes. Leaving it out
+# also means the container needs nothing from PyPI (bcrypt is only for that
+# seed).
 readonly SEED_ONLY="jackett,qbit"
+# Where qBittorrent's Jackett search plugin finds Jackett: 127.0.0.1:9117,
+# because both share Gluetun's network and Jackett always listens on 9117
+# there. JACKETT_PORT in .env is only the port on the Unraid server.
+readonly JACKETT_INNER_PORT=9117
+# The FileBrowser image always runs as uid 1000, whatever PUID is;
+# compose.yaml adds it to the PGID group (group_add). FileBrowser's config
+# folder and the download folders are therefore made writable for that group.
+readonly FILEBROWSER_UID=1000
 
 # The apps' live settings go in <stack folder>/appdata, not in the
 # repository's configs/ folder. configs/ holds two files git tracks (the
@@ -177,11 +189,13 @@ Environment variables (all optional; they also pre-fill the questions):
   TS_VPN_PROVIDER (protonvpn), TS_VPN_TYPE (wireguard|openvpn),
   TS_WIREGUARD_ADDRESSES, TS_OPENVPN_USER, TS_SERVER_COUNTRIES,
   TS_QBITTORRENT_USER (admin)
-  TS_QBIT_WEBUI_PORT, TS_FILEBROWSER_PORT (JACKETT_PORT and FLARESOLVERR_PORT
-                             must stay 9117 and 8191: see the README)
+  TS_QBIT_WEBUI_PORT (8090), TS_JACKETT_PORT (9117), TS_FLARESOLVERR_PORT
+  (8191), TS_FILEBROWSER_PORT (8081)
+                             Ports on the Unraid server; all four must differ.
   Secrets are read from files, never from the command line:
   TS_WIREGUARD_PRIVATE_KEY_FILE, TS_OPENVPN_PASSWORD_FILE,
-  TS_QBITTORRENT_PASSWORD_FILE  (first line of the file; chmod 600 it)
+  TS_QBITTORRENT_PASSWORD_FILE  (first line of the file; chmod 600 it; it is
+                                also FileBrowser's admin password)
   TS_SCRIPT_NOTIFY_URL_FILE     Discord webhook for port-forward messages
                                 (same format; default: none)
   TS_SOURCE_DIR=/path        Copy this local checkout instead of downloading.
@@ -957,8 +971,8 @@ wizard() {
   set_setting SERVER_COUNTRIES "$countries"
 
   echo
-  echo "  ${BOLD}qBittorrent login${CL} (the qBittorrent web UI only; FileBrowser makes"
-  echo "  its own admin password, shown at the end)."
+  echo "  ${BOLD}qBittorrent login${CL}. The password is also FileBrowser's: FileBrowser's"
+  echo "  user is always \"admin\", with this password."
   qbit_user=$(current QBITTORRENT_USER "admin")
   is_unset QBITTORRENT_USER "$qbit_user" && qbit_user="admin"
   ask qbit_user "qBittorrent username" "$qbit_user"
@@ -977,7 +991,7 @@ wizard() {
   else
     ask_secret qbit_pw "qBittorrent password (empty = keep current)"
   fi
-  [[ ${#qbit_pw} -ge 8 ]] || die "The qBittorrent password must be at least 8 characters."
+  check_qbit_password "$qbit_pw"
   set_setting QBITTORRENT_USER "$qbit_user"
   set_setting QBITTORRENT_PASSWORD "$qbit_pw"
   # Discord webhook for the port-forward script: from
@@ -1007,25 +1021,50 @@ wizard() {
     [[ "$val" =~ ^[0-9]+$ && "$val" -ge 1 && "$val" -le 65535 ]] || die "${key} must be a port number (got '${val}')."
     set_setting "$key" "$val"
   done
-  check_ports "${SETTINGS[QBIT_WEBUI_PORT]}" "${SETTINGS[JACKETT_PORT]}" "${SETTINGS[FLARESOLVERR_PORT]}"
+  check_ports "${SETTINGS[QBIT_WEBUI_PORT]}" "${SETTINGS[JACKETT_PORT]}" \
+    "${SETTINGS[FLARESOLVERR_PORT]}" "${SETTINGS[FILEBROWSER_PORT]}"
   if [[ ! -f "$ENV_FILE" ]]; then
     set_setting COMPOSE_PROFILES ""
   fi
 }
 
-# check_ports QBIT JACKETT FLARESOLVERR: refuse ports this stack cannot use.
-# The repository's compose.yaml publishes each app port as HOST:SAME on the
-# gluetun container, but Jackett and FlareSolverr always listen on 9117 and
-# 8191 inside it, so any other JACKETT_PORT or FLARESOLVERR_PORT would
-# publish a port nothing answers on (and point qBittorrent's search plugin
-# at it). qBittorrent shares that network with Jackett, FlareSolverr and
-# Gluetun's own control (8000) and health (9999) servers, so its port must
-# not be one of those.
+# check_qbit_password PASSWORD: the qBittorrent password is also FileBrowser's
+# admin password (compose.yaml: FILEBROWSER_ADMIN_PASSWORD). FileBrowser
+# stores it as a bcrypt hash, and bcrypt refuses more than 72 bytes, so
+# FileBrowser could not create or update its admin user with a longer one.
+check_qbit_password() {
+  local pw=$1 bytes
+  [[ ${#pw} -ge 8 ]] || die "The qBittorrent password must be at least 8 characters."
+  # printf is a bash builtin, so the password is not on any command line.
+  bytes=$(printf '%s' "$pw" | wc -c)
+  [[ "$bytes" -le 72 ]] || die "The qBittorrent password is ${bytes} bytes long; at most 72 work, because it is also FileBrowser's admin password and FileBrowser (bcrypt) cannot store a longer one."
+}
+
+# check_ports QBIT JACKETT FLARESOLVERR FILEBROWSER: refuse ports this stack
+# cannot use. All four are ports on the Unraid server, so they must be
+# different numbers. compose.yaml publishes Jackett's JACKETT_PORT and
+# FlareSolverr's FLARESOLVERR_PORT to the fixed ports they listen on inside
+# Gluetun's network (9117 and 8191), so any free port works for those. It
+# publishes QBIT_WEBUI_PORT as the same number inside that network, because
+# qBittorrent's web UI rejects a request whose port differs, so that one
+# must not be a port Jackett (9117), FlareSolverr (8191) or Gluetun's own
+# control (8000) and health (9999) servers already use there.
 check_ports() {
-  [[ "$2" == 9117 ]] || die "JACKETT_PORT must be 9117 (got $2): Jackett listens on 9117 inside its container, and this stack publishes the same port number on the host. Set it back to 9117."
-  [[ "$3" == 8191 ]] || die "FLARESOLVERR_PORT must be 8191 (got $3): FlareSolverr listens on 8191 inside its container, and this stack publishes the same port number on the host. Set it back to 8191."
-  case "$1" in
-  8000 | 8191 | 9117 | 9999) die "QBIT_WEBUI_PORT cannot be $1: qBittorrent shares Gluetun's network with Jackett (9117), FlareSolverr (8191) and Gluetun's own servers (8000, 9999). Pick another port, such as 8090." ;;
+  local names=(QBIT_WEBUI_PORT JACKETT_PORT FLARESOLVERR_PORT FILEBROWSER_PORT)
+  local i j
+  local -a ports=("$@")
+  for i in 0 1 2 3; do
+    [[ "${ports[i]:-}" =~ ^[0-9]+$ && "${ports[i]}" -ge 1 && "${ports[i]}" -le 65535 ]] ||
+      die "${names[i]} must be a port number from 1 to 65535 (got '${ports[i]:-}')."
+  done
+  for i in 0 1 2; do
+    for ((j = i + 1; j < 4; j++)); do
+      [[ "${ports[i]}" != "${ports[j]}" ]] ||
+        die "${names[i]} and ${names[j]} are both ${ports[i]}; each app needs its own port on the server."
+    done
+  done
+  case "${ports[0]}" in
+  8000 | 8191 | 9117 | 9999) die "QBIT_WEBUI_PORT cannot be ${ports[0]}: qBittorrent shares Gluetun's network with Jackett (9117), FlareSolverr (8191) and Gluetun's own servers (8000, 9999), and uses the same port number inside it. Pick another port, such as 8090." ;;
   esac
   return 0
 }
@@ -1040,6 +1079,8 @@ show_summary() {
   show "Time zone" "$TZ_VALUE"
   show "VPN" "${SETTINGS[VPN_PROVIDER]} / ${SETTINGS[VPN_TYPE]} ($([[ "$VPN_READY" == 1 ]] && echo "keys set" || echo "keys not set yet: the stack will not start"))"
   show "qBittorrent user" "${SETTINGS[QBITTORRENT_USER]}"
+  show "FileBrowser user" "admin (with the qBittorrent password)"
+  show "Ports" "qBittorrent ${SETTINGS[QBIT_WEBUI_PORT]}, Jackett ${SETTINGS[JACKETT_PORT]}, FlareSolverr ${SETTINGS[FLARESOLVERR_PORT]}, FileBrowser ${SETTINGS[FILEBROWSER_PORT]}"
   show "Compose Manager" "$CM_STACK_DIR"
   echo
 }
@@ -1100,17 +1141,36 @@ prepare_folders() {
   # Gluetun runs this as /gluetun/update-qbittorrent.sh, so it must be executable.
   run chmod 755 "${STACK_DIR}/update-qbittorrent.sh"
   fix_ownership
-  msg_ok "Folders ready (owned by ${PUID}:${PGID})"
+  msg_ok "Folders ready (owned by ${PUID}:${PGID}; FileBrowser's uid ${FILEBROWSER_UID} writes through group ${PGID})"
 }
 
 fix_ownership() {
   local d
-  # Gluetun runs as root and keeps its own folder; env-editor credentials stay root-only.
-  for d in qbittorrent jackett flaresolverr filebrowser; do
+  # Gluetun runs as root and keeps its own folder; env-editor credentials stay
+  # root-only. qBittorrent, Jackett and FlareSolverr run as PUID:PGID.
+  for d in qbittorrent jackett flaresolverr; do
     [[ -d "${CONFIG_PATH}/${d}" || "$DRY_RUN" == 1 ]] && run chown -R "${PUID}:${PGID}" "${CONFIG_PATH}/${d}"
   done
+  # FileBrowser runs as uid 1000 whatever PUID is, with PGID as an extra
+  # group, and keeps its database (database.sqlite, plus the -wal and -shm
+  # files SQLite adds next to it) in this folder. So: the folder belongs to
+  # PUID:PGID and the group may write in it; setgid (the "s") gives new files
+  # the PGID group. Files FileBrowser already made keep their owner (uid
+  # 1000) and get the PGID group with group write. A plain chown -R to PUID,
+  # as for the other apps, would leave FileBrowser a database it cannot write.
+  d="${CONFIG_PATH}/filebrowser"
+  if [[ -d "$d" || "$DRY_RUN" == 1 ]]; then
+    run chown "${PUID}:${PGID}" "$d"
+    run chgrp -R "$PGID" "$d"
+    run chmod -R g+rwX "$d"
+    run chmod g+s "$d"
+  fi
   # Only the two download folders themselves, never what is already in them.
+  # Group write and setgid let FileBrowser (through PGID) add, rename and
+  # delete files there; permissions are only added, never taken away.
   run chown "${PUID}:${PGID}" "$DOWNLOADS" "${DOWNLOADS}/incomplete"
+  run chmod ug+rwx "$DOWNLOADS" "${DOWNLOADS}/incomplete"
+  run chmod g+s "$DOWNLOADS" "${DOWNLOADS}/incomplete"
 }
 
 # stop_for_seeding: qBittorrent writes its settings back when it stops, so a
@@ -1151,14 +1211,17 @@ restart_stopped_apps() {
 # (.env, the scripts) is mounted read-only and only CONFIG_PATH is writable;
 # the CLI reads .env as root, then switches to PUID:PGID (--as-user) before
 # it writes anything. Nothing is installed in the container, so the only
-# download is the Jackett search plugin from GitHub.
+# download is the Jackett search plugin from GitHub. --jackett-port points
+# that plugin at 127.0.0.1:9117 (Jackett inside Gluetun's network), not at
+# JACKETT_PORT, which is only the port on the Unraid server.
 seed_configs() {
   local mounts=(-v "${STACK_DIR}:${STACK_DIR}:ro" -v "${CONFIG_PATH}:${CONFIG_PATH}")
   msg_info "Seeding the qBittorrent and Jackett configs (${SEED_IMAGE%%@*})"
   [[ "$DRY_RUN" == 1 ]] || docker rm -f "${STACK}-seed" >/dev/null 2>&1 || true
   if ! run docker run --rm --name "${STACK}-seed" "${mounts[@]}" --entrypoint python3 "$SEED_IMAGE" \
     -I "${STACK_DIR}/scripts/env-editor/seed_configs.py" --env "${STACK_DIR}/.env" \
-    --config-root "$CONFIG_PATH" --only "$SEED_ONLY" --as-user "${PUID}:${PGID}" 2>&1 | sed 's/^/         /'; then
+    --config-root "$CONFIG_PATH" --only "$SEED_ONLY" --as-user "${PUID}:${PGID}" \
+    --jackett-port "$JACKETT_INNER_PORT" 2>&1 | sed 's/^/         /'; then
     restart_stopped_apps
     die "Seeding failed (see above). The container needs internet access to download the Jackett search plugin from GitHub."
   fi
@@ -1348,10 +1411,9 @@ print_access() {
   if [[ -n "$QBIT_PW_GENERATED" ]]; then
     show "Generated password" "$QBIT_PW_GENERATED"
   fi
-  show "FileBrowser login" "admin / a password FileBrowser makes itself; to see it:"
-  echo "         docker logs ${STACK}-filebrowser-1 2>&1 | grep -i 'initial admin password'"
-  echo "         (FileBrowser makes a new one each time its container is recreated, for"
-  echo "         example after Update Stack.)"
+  show "FileBrowser login" "admin / the same password as qBittorrent"
+  echo "         (FileBrowser sets it again from .env each time it starts, so change"
+  echo "         it in .env, not in FileBrowser.)"
   show "Compose Manager" "Docker tab > Compose > ${STACK}"
 }
 
@@ -1445,7 +1507,9 @@ do_apply() {
   if is_unset QBITTORRENT_USER "$qbit_user" || is_unset QBITTORRENT_PASSWORD "$qbit_pw"; then
     die "QBITTORRENT_USER/QBITTORRENT_PASSWORD in ${ENV_FILE} are still placeholders."
   fi
-  check_ports "$(env_get "$ENV_FILE" QBIT_WEBUI_PORT)" "$(env_get "$ENV_FILE" JACKETT_PORT)" "$(env_get "$ENV_FILE" FLARESOLVERR_PORT)"
+  check_qbit_password "$qbit_pw"
+  check_ports "$(env_get "$ENV_FILE" QBIT_WEBUI_PORT)" "$(env_get "$ENV_FILE" JACKETT_PORT)" \
+    "$(env_get "$ENV_FILE" FLARESOLVERR_PORT)" "$(env_get "$ENV_FILE" FILEBROWSER_PORT)"
   prepare_folders
   stop_for_seeding
   seed_configs
@@ -1463,9 +1527,13 @@ do_update() {
   prepare_source update
   install_source update
   [[ "$DRY_RUN" == 1 ]] || SRC_DIR="$STACK_DIR"
-  run chmod 755 "${STACK_DIR}/update-qbittorrent.sh"
   docker compose -p "$STACK" -f "$STACK_DIR/compose.yaml" --env-file "$ENV_FILE" config -q ||
     die "The updated compose.yaml does not work with your .env (see above). Nothing was restarted."
+  # The folders as this version of compose.yaml needs them, before anything
+  # is recreated. An install made before FileBrowser kept its database in
+  # appdata/filebrowser has that folder writable for its owner only, and the
+  # new FileBrowser container (uid 1000, through PGID) would not start.
+  prepare_folders
   if vpn_ready_from_env; then
     register_stack true
     msg_info "Pulling new images and recreating containers (Compose Manager 'Update Stack')"

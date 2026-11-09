@@ -13,7 +13,7 @@ Written for **TrueNAS 25.10** ("Goldeye") and its API.
 * **A root shell.** Open **System > Shell** in the web UI, or SSH in as your admin user. Then type `sudo -i` (enter your admin password if asked). The prompt should end in `#`.
 * **Internet access** from TrueNAS (GitHub, Docker Hub, ghcr.io, lscr.io).
 * **A VPN provider with port forwarding**: ProtonVPN, PIA, Perfect Privacy or PrivateVPN. See [Prerequisites](../../README.md#prerequisites) in the main README. You can also install first and add the VPN details later.
-* **Free ports** on the TrueNAS address: 8090 (qBittorrent), 9117 (Jackett), 8191 (FlareSolverr) and 8081 (FileBrowser). You can choose others. The installer checks for clashes with other apps, the web UI and anything else listening. (For Jackett and FlareSolverr only the port on the TrueNAS address changes. Inside the VPN container they stay on 9117 and 8191, because those two apps don't follow the setting. qBittorrent therefore can't use 9117 or 8191, and the installer refuses them.)
+* **Free ports** on the TrueNAS address: 8090 (qBittorrent), 9117 (Jackett), 8191 (FlareSolverr) and 8081 (FileBrowser). You can choose others. The installer checks for clashes with other apps, the web UI and anything else listening. (For Jackett and FlareSolverr only the port on the TrueNAS address changes: `compose.yaml` publishes them as `<port>:9117` and `<port>:8191`, because inside the VPN container those two apps always listen on 9117 and 8191. qBittorrent shares that network, so it can't use 9117 or 8191, and the installer refuses them.)
 * **Dataset names without `:` or spaces.** ZFS allows `:`, but a Docker volume line can't hold one.
 
 ## Install
@@ -73,13 +73,24 @@ If `whiptail` or `dialog` is installed, the installer uses it for the questions.
 * It stays inside the parent dataset: another dataset mounted inside `source/` is not touched.
 * Nobody but root may be able to write to the parent dataset. Otherwise a container user could swap `source/` for a script of their own, and Gluetun would run it as root. If PUID or the `apps` user (568) can write to an existing parent dataset, the installer stops and asks you to fix its permissions. If it created the dataset in this run, it fixes them itself.
 
-**Owners**: the config folders and a newly created downloads dataset belong to PUID:PGID. FileBrowser's config folder belongs to 1000:PGID, because the FileBrowser image always runs as user 1000.
+**Owners and modes.** The FileBrowser image always runs as user 1000, whatever PUID is. `compose.yaml` gives it PGID as an extra group (`group_add`), so the folders FileBrowser uses must be writable for that group:
 
-**First-run configs**: the installer runs the repository's seeding CLI (`scripts/env-editor/seed_configs.py`) with TrueNAS's own Python. It sets the qBittorrent password and enables search, gives Jackett an API key, and connects qBittorrent's Jackett search plugin to it. This happens only on a first install, after a qBittorrent login change, or with `--reseed`. Around that:
+| Folder | Owner | Mode | Why |
+|---|---|---|---|
+| `configs/gluetun`, `qbittorrent`, `jackett`, `flaresolverr` | PUID:PGID | as created (755) | The user each app runs as. |
+| `configs/filebrowser` | 1000:PGID | 2770 | FileBrowser's database. Writable for user 1000 and group PGID. The `2` (setgid) makes new files there belong to PGID. Closed to everyone else: the database holds FileBrowser's password hashes and the key that signs its logins. A re-run fixes this folder if an older version of the installer made it 755. |
+| the downloads dataset, if the installer creates it | PUID:PGID | 2775 | qBittorrent saves there as PUID:PGID. FileBrowser gets in through group PGID. |
+| `incomplete/`, if the installer creates it | PUID:PGID | 2775 | The same. |
+
+The installer sets the owners through the TrueNAS API. It sets the modes with a plain `chmod g+rwxs`, because the API (`filesystem.setperm`) would first strip the dataset's ACL. The Apps preset allows `chmod`: its datasets have `aclmode=passthrough`. The preset's ACL already gives the owner, the owning group and the `apps` user (568) write access, and its entries are marked to be inherited by new files and folders.
+
+A downloads dataset you already had keeps its owner and mode. The installer warns if PUID:PGID (qBittorrent) or FileBrowser (user 1000 with group PGID) can't write to it, and prints the commands that fix it.
+
+**First-run configs**: the installer runs the repository's seeding CLI (`scripts/env-editor/seed_configs.py`) with TrueNAS's own Python. It sets the qBittorrent password and enables search, gives Jackett an API key, and connects qBittorrent's Jackett search plugin to it at `127.0.0.1:9117`. That is where Jackett listens inside the VPN container, whatever its port on the TrueNAS address is. This happens only on a first install, after a qBittorrent login change, or with `--reseed`. FileBrowser needs no seeding (see [First login](#first-login)). Around that:
 
 * **qBittorrent's own defaults come first.** The LinuxServer image only writes its default `qBittorrent.conf` when there is no file yet, and the seeding creates one. So the installer writes those defaults itself first: downloads go to `/downloads` (your downloads dataset), unfinished ones to `/downloads/incomplete`, and UPnP is off. It adds the settings of the repository's own starting `qBittorrent.conf`, which the other Docker platforms copy: VueTorrent as the web UI (`/vuetorrent`; the VueTorrent mod installs it but, like its predecessor mod, does not switch it on), the login asked for even from localhost, and the incomplete folder in use. Without this, qBittorrent would save into its config folder and show its plain web UI.
 * **The search plugin is pinned.** The Jackett search plugin (a Python file that qBittorrent runs) comes from the commit pinned in `native/versions.env` and is checked against its sha256. If the pin is missing from your checkout, the installer stops: the seeding CLI refuses an unpinned plugin too.
-* **qBittorrent 5.3 keeps its login in a `[WebUI]` section.** It moves the login there on its first start and then ignores the old place, which is where the seeding CLI writes. So after a re-seed, the installer moves the new login into `[WebUI]` too.
+* **qBittorrent 5.3 keeps its login in a `[WebUI]` section.** It moves the login there on its first start and then ignores the old place. The seeding CLI now writes a re-seeded login into `[WebUI]` as well. The installer also moves the old copies left in `[Preferences]` into `[WebUI]`.
 * **All of this runs as PUID:PGID, not as root** (with `setpriv`). The containers can change anything in their config folders, links included. A root process writing there could be tricked into overwriting a file on TrueNAS itself. It runs in a private mount namespace (`unshare`) that shows it only qBittorrent's and Jackett's config folders and the repository copy, the way the containers see them. That matters for a PUID other than 568: TrueNAS's Apps preset lets only root and the `apps` user into the configs dataset itself.
 
 **The app**: a custom app created through the TrueNAS API (`app.create`). Its YAML is `compose.yaml` with these changes:
@@ -89,22 +100,23 @@ If `whiptail` or `dialog` is installed, the installer uses it for the questions.
 * **Paths are full dataset paths** (`/mnt/tank/torrent-stack/...`), including `update-qbittorrent.sh`.
 * **No Watchtower.** TrueNAS checks app images for updates itself (see [Updating](#updating)).
 * **No `name:` line.** TrueNAS names the project `ix-<app name>` itself.
-* **Jackett and FlareSolverr ports.** They are published as `<JACKETT_PORT>:9117` and `<FLARESOLVERR_PORT>:8191` rather than `<port>:<port>`, because inside the VPN container those two apps always listen on 9117 and 8191. (With the plain `compose.yaml`, a changed Jackett or FlareSolverr port can't be reached at all.)
-* **FileBrowser settings.** `FILEBROWSER_DATABASE_PATH=/config/database.sqlite` keeps FileBrowser's users and settings in its config folder. The image's default location is not on any dataset, and TrueNAS recreates the containers on every update, so they would be lost each time. `FILEBROWSER_ADMIN_PASSWORD` is the qBittorrent password (see [First login](#first-login)).
-* **`group_add: [PGID]` on FileBrowser.** FileBrowser runs as user 1000. The extra group lets it manage downloads that belong to the `apps` user.
 * **VPN gating.** While the VPN settings are still the placeholders from `.env.example`, Gluetun, qBittorrent, Jackett and FlareSolverr get `profiles: [vpn-not-configured]`. TrueNAS then starts only FileBrowser.
 
   Without this, Gluetun would exit on the placeholder key. `docker compose up` would report "dependency failed to start", and TrueNAS would delete the half-created app again.
 
-Gluetun keeps `/dev/net/tun` and `NET_ADMIN`, and qBittorrent, Jackett and FlareSolverr keep `network_mode: service:gluetun`. The installer refuses to produce a YAML without them. Before it creates anything it also checks that `/dev/net/tun` exists on the TrueNAS host (trying `modprobe tun` once): TrueNAS deletes an app whose first start fails.
+Everything else is `compose.yaml` as it is, with nothing added for TrueNAS. That includes the Jackett and FlareSolverr port mapping (`<JACKETT_PORT>:9117`, `<FLARESOLVERR_PORT>:8191`) and FileBrowser's settings: its database in its config folder, its admin password from `QBITTORRENT_PASSWORD`, and the extra PGID group.
+
+Gluetun keeps `/dev/net/tun` and `NET_ADMIN`, and qBittorrent, Jackett and FlareSolverr keep `network_mode: service:gluetun`. The installer refuses to produce a YAML without them. It also refuses a `compose.yaml` that keeps FileBrowser's database outside a folder on the configs dataset, because TrueNAS recreates the containers on every update and the database would be emptied each time. Before it creates anything it also checks that `/dev/net/tun` exists on the TrueNAS host (trying `modprobe tun` once): TrueNAS deletes an app whose first start fails.
 
 ## First login
 
 * **qBittorrent**: `http://<truenas-ip>:8090`, with the login printed at the end.
 * **Jackett**: `http://<truenas-ip>:9117`. Its API key is set, and qBittorrent's search tab already uses it. Add indexers in Jackett.
-* **FileBrowser**: `http://<truenas-ip>:8081`. User `admin`, with the qBittorrent password. (FileBrowser's admin user is always called `admin`, even if you chose another qBittorrent username.)
+* **FileBrowser**: `http://<truenas-ip>:8081`. User `admin`, with the qBittorrent password. (FileBrowser's admin user is always called `admin`, even if you chose another qBittorrent username.) There is no generated first password to look for in a log.
 
-  FileBrowser sets the admin password to the one in the app's YAML (`FILEBROWSER_ADMIN_PASSWORD` under `filebrowser`) every time it starts. A password you change in FileBrowser itself therefore only lasts until the next restart or update. To change it for good, change the qBittorrent password with the installer (see [Changing settings later](#changing-settings-later)), which updates both. Other users, shares and settings you make in FileBrowser are kept: they live in `configs/filebrowser/database.sqlite`.
+  `compose.yaml` hands the qBittorrent password to FileBrowser as `FILEBROWSER_ADMIN_PASSWORD` (under `filebrowser` in the app's YAML). FileBrowser sets the `admin` password to it **every time it starts**. A password you change for `admin` inside FileBrowser therefore lasts only until the next restart or app update. To change it for good, change the qBittorrent password with the installer (see [Changing settings later](#changing-settings-later)), which updates both.
+
+  **What FileBrowser keeps**: everything else. Its database is `configs/filebrowser/database.sqlite` on your configs dataset (`FILEBROWSER_DATABASE_PATH=/config/database.sqlite` in `compose.yaml`). Users you add, shares and settings survive restarts, app updates and TrueNAS recreating the containers.
 
 ## Adding the VPN settings later
 
@@ -125,7 +137,7 @@ The installer reads the settings back from the app's current YAML, including cha
 
 Two things to know:
 
-* **Changing the qBittorrent password.** The password is in three places: in the YAML twice (Gluetun's port-forward script uses it, and FileBrowser's admin password is set from it) and in qBittorrent's own config. Change it with the installer: the wizard, or `TS_QBITTORRENT_PASSWORD_FILE=...`. The installer notices the change, stops the app, rewrites qBittorrent's config, updates the YAML and starts the app again. If you change it in the web UI's YAML instead, run the installer with `--reseed` afterwards, so qBittorrent and FileBrowser get it too.
+* **Changing the qBittorrent password.** The password is in three places: in the YAML twice (Gluetun's port-forward script uses it, and FileBrowser's admin password is set from it) and in qBittorrent's own config. Change it with the installer: the wizard, or `TS_QBITTORRENT_PASSWORD_FILE=...`. The installer notices the change, stops the app, rewrites qBittorrent's config, updates the YAML and starts the app again. If you change it in the web UI's YAML instead, change the `QBITTORRENT_PASSWORD` line under `gluetun`, then run the installer with `--reseed`, so qBittorrent and FileBrowser get it too. (The installer reads the password from that line. If you only change `FILEBROWSER_ADMIN_PASSWORD`, the next run sets it back to the qBittorrent password.)
 * **Changing PUID/PGID** re-owns the config folders. It does not re-own the downloads; the installer tells you the `chown` command to run.
 
 ## Updating
@@ -200,7 +212,7 @@ Letting the installer create the app does all of this for you.
 
   The installer avoids the common causes. It pulls each image first, so a pull problem is reported per image. It checks the ports beforehand. It gates the VPN apps while the VPN settings are placeholders.
 * **Image pulls inside app creation can time out.** TrueNAS gives `docker compose up` 20 minutes, including the image downloads. Users have worked around failures by pulling the images first, which the installer now does. Docker Hub rate limits show up as *"toomanyrequests"*. Try again later, sign in under **Apps > Configuration > Sign-in to a Docker registry**, or set a registry mirror under **Apps > Configuration > Settings**.
-* **Saving the YAML recreates every container**, and TrueNAS runs `up --force-recreate` on every change. Expect a VPN reconnect and a qBittorrent restart. Anything a container keeps outside its mounted folders is lost then. That is why the installer moves FileBrowser's database into its config folder.
+* **Saving the YAML recreates every container**, and TrueNAS runs `up --force-recreate` on every change. Expect a VPN reconnect and a qBittorrent restart. Anything a container keeps outside its mounted folders is lost then. That is why `compose.yaml` keeps FileBrowser's database in its config folder, and the installer refuses a `compose.yaml` that doesn't.
 * **An update that fails still saves the YAML.** TrueNAS writes the new YAML first and then starts the containers. If the start fails, the app is left crashed with the new YAML (see [Updating](#updating)).
 * **Restart the whole app, not Gluetun alone.** qBittorrent, Jackett and FlareSolverr share Gluetun's network. Use the app's **Stop**/**Start** (or Restart) on the Apps screen.
 * **Comments disappear.** TrueNAS reads the YAML and writes it back out, so comments are lost, including the explanation at the top of the installer's YAML.
@@ -219,6 +231,7 @@ Letting the installer create the app does all of this for you.
 * The env-editor web page from the main README is not used on TrueNAS. TrueNAS appliances shouldn't have extra software installed on the host, and the app's YAML takes its place.
 * FileBrowser's admin user is always `admin`, and its password always follows the qBittorrent password (see [First login](#first-login)).
 * The seeding CLI's FileBrowser step (`settings.yaml` with a bcrypt hash) is not used on TrueNAS. The current FileBrowser image never reads that file.
+* **Files in the downloads are not group-writable.** qBittorrent saves them with its default umask 022 (files `rw-r--r--`, folders `rwxr-xr-x`), and FileBrowser creates its own the same way (its default 644/755). The downloads folder itself is group-writable, so FileBrowser can delete or rename what sits directly in it. With plain permissions it can't change or delete files inside a folder that qBittorrent created. The Apps preset's inherited ACL (group Modify) may give the group that access on TrueNAS. That was not tried on real ZFS.
 * FileBrowser publishes its port on all addresses, as in the main stack. Firewall it or put it behind a reverse proxy if TrueNAS is reachable from untrusted networks.
 
 ## What was tested, and what was not
@@ -227,15 +240,18 @@ Tested on a Linux test machine, not on TrueNAS. The test suite is `platforms/tru
 
 It replaces `midclt` and TrueNAS's Python API client with stand-ins that record every call. Each call is checked against the parameters documented for TrueNAS 25.10, including whether it's a job (`-j`); `app.delete` is also checked against 27.0. The stand-ins also run the YAML through `docker compose config`, as TrueNAS's middleware does.
 
-The real installer runs against the real repository, with real seeding, inside a private mount namespace whose `/mnt` is empty. On the last run all 205 checks passed. They cover:
+The real installer runs against the real repository, with real seeding, inside a private mount namespace whose `/mnt` is empty. On the last run all 215 checks passed. They cover:
 
-* a fresh install without VPN settings (gated), including qBittorrent's default paths, the pinned search plugin (sha256), and the FileBrowser database and password settings in the YAML;
-* adding VPN settings later; a re-run with no changes; settings edited in the web UI being kept;
+* a fresh install without VPN settings (gated), including qBittorrent's default paths, the pinned search plugin (sha256), and FileBrowser's database path and password in the YAML;
+* that the app's services are exactly what `docker compose config` makes of `compose.yaml` with the same settings, apart from the differences listed under [What it creates](#what-it-creates). So the installer adds no FileBrowser or port settings of its own;
+* the folder owners and modes in the table above (FileBrowser's folder 2770, downloads and `incomplete/` 2775), checked as user 1000 with and without group PGID; a FileBrowser folder left at 755 by an older installer being fixed; the warning for an existing downloads dataset that FileBrowser can't write to;
+* a `compose.yaml` that keeps FileBrowser's database outside the configs dataset (refused);
+* adding VPN settings later; a re-run with no changes; settings edited in the web UI being kept, and a `FILEBROWSER_ADMIN_PASSWORD` edited on its own going back to the qBittorrent password;
 * a password change triggering a re-seed after qBittorrent's first start, with the new login landing in `[WebUI]` (checked with a real container too: a password with `$` and `"` arrives exactly as typed);
 * `--dry-run`, `--print-yaml` and `--uninstall`;
 * an existing downloads dataset, OpenVPN, PUID 1000, with the configs dataset closed to uid 1000 (as the Apps preset is) while the seeding still works;
 * the `source/` folder: someone else's `source` folder refused before any change (also with `--dry-run`); a YAML edited to mount the script from another folder or from a pool's top folder (that folder is left alone); a file system mounted inside `source/` (not emptied); a parent dataset the apps user can write to (refused); a second app on the same parent dataset (refused);
-* Jackett and FlareSolverr on other host ports (published to 9117/8191 inside, read back unchanged on a re-run), and qBittorrent on 9117 (refused);
+* Jackett and FlareSolverr on other host ports (published to 9117/8191 inside, read back unchanged on a re-run, qBittorrent's search plugin still at `127.0.0.1:9117`), and qBittorrent on 9117 (refused);
 * `:` in a dataset name or path (refused before anything is created), and PUID/PGID written with leading zeros;
 * recovery: a failed `app.update` (TrueNAS keeps the new YAML, the app crashes), and a failed `app.start` after a re-seed. In both cases running the same command again starts the app. An app the user stopped stays stopped, and one started by hand since is left alone;
 * a link planted in a config folder (pointing at a root-owned file) does not let the re-seed change that file;
@@ -244,15 +260,16 @@ The real installer runs against the real repository, with real seeding, inside a
 * that no secret ever appears on a `midclt` command line;
 * `shellcheck -S warning` and `bash -n`.
 
-A second script, `platforms/truenas/tests/runtime-images.sh`, checks the same seeding against the real images, with no network. On the last run all 13 checks passed. It used qBittorrent 5.3.0 (`lscr.io/linuxserver/qbittorrent:latest`, ls487) and FileBrowser v2.0.2-stable:
+A second script, `platforms/truenas/tests/runtime-images.sh`, checks the same seeding against the real images, with no network. On the last run all 18 checks passed. It used qBittorrent 5.3.0 (`lscr.io/linuxserver/qbittorrent:latest`, ls487) and FileBrowser v2.0.2-stable:
 
 * qBittorrent logs in with the seeded password, saves to `/downloads` and `/downloads/incomplete`, and has UPnP off;
-* after its first start, a re-seeded password is refused without the `[WebUI]` step and accepted with it;
-* FileBrowser, started from the rendered YAML, accepts `admin` with the qBittorrent password (one with `$` in it) and refuses `admin`/`admin`. It keeps its database after `up --force-recreate`.
+* after its first start, a re-seeded password works, both with and without the installer's `[WebUI]` step (the seeding CLI now writes `[WebUI]` itself);
+* FileBrowser, started from the rendered YAML (that is, `compose.yaml`'s service), accepts `admin` with the qBittorrent password (one with `$` in it) and refuses `admin`/`admin`. It keeps its database after `up --force-recreate`;
+* FileBrowser's container user is uid 1000 with the extra group 568. Through its own web API it creates a folder in a 568:568, 2775 downloads folder (the folder gets group 568), and deletes a file saved there as 568:568, 644. With the downloads at 755 it can't create anything.
 
 Not tested:
 
-* **A real TrueNAS**: the real middleware's behaviour beyond what its documentation and 25.10.8 source show, real ZFS datasets and ACLs, and real image pulls. In particular, the write-access check on the parent dataset (done as PUID and as 568 with `setpriv`) was only tried with plain Unix permissions, not with NFSv4 ACLs. Nor was it tried whether `filesystem.setperm` with `stripacl` fixes a parent dataset that inherited an ACL.
+* **A real TrueNAS**: the real middleware's behaviour beyond what its documentation and 25.10.8 source show, real ZFS datasets and ACLs, and real image pulls. In particular, the write-access checks (the parent dataset as PUID and as 568, the downloads as FileBrowser's user, all with `setpriv`) and the `chmod g+rwxs` on new folders were only tried with plain Unix permissions on tmpfs, not with NFSv4 ACLs. Nor was it tried whether `filesystem.setperm` with `stripacl` fixes a parent dataset that inherited an ACL, or whether the Apps preset's inherited ACL makes the files qBittorrent saves group-writable.
 * Jackett and FlareSolverr reachable on changed ports from the LAN: the published-port mapping was checked in the YAML, not with a running stack (no Docker bridge networking here).
 * The installer's use of TrueNAS's real `truenas_api_client` library. The stand-in has the same interface as the 25.10 source, but the real library was not exercised.
 * A real VPN connection: no VPN credentials were available.
@@ -270,7 +287,8 @@ Not tested:
 * TrueNAS build manifest, release/25.10.8 (git ships): <https://github.com/truenas/scale-build/blob/release/25.10.8/conf/build.manifest>
 * Forum: [25.10 RC1 custom app YAML input bug](https://forums.truenas.com/t/25-10-rc1-custom-app-yaml-input-bug/55300) (the `services` key), [Can't spin up custom docker-compose.yml, no logs in app_lifecycle.log](https://forums.truenas.com/t/cant-spin-up-custom-docker-compose-yml-file-no-logs-in-var-log-app-lifecycle-log/67097) (pre-pulling images)
 * TechnoTim, TrueNAS Docker Pro (the `services: {}` workaround): <https://technotim.com/posts/truenas-docker-pro/>
-* FileBrowser image runs as uid 1000 and sets `FILEBROWSER_DATABASE_PATH` / `FILEBROWSER_CONFIG` to `/home/filebrowser/data`: [_docker/Dockerfile at v2.0.2-stable](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/_docker/Dockerfile); `FILEBROWSER_ADMIN_PASSWORD` and the database path: [backend/pkg/settings/config.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/config.go), [database_paths.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/database_paths.go), [auth.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/auth.go) (the admin password is reset on every start)
+* FileBrowser Quantum v2.0.2-stable. The image runs as uid 1000 (group 1000) and sets `FILEBROWSER_DATABASE_PATH` / `FILEBROWSER_CONFIG` to `/home/filebrowser/data`: [_docker/Dockerfile](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/_docker/Dockerfile). `FILEBROWSER_ADMIN_PASSWORD` sets `auth.adminPassword`, the admin user is `admin` by default (no environment variable changes that), and new files and folders get 644/755: [backend/pkg/settings/config.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/config.go) (`loadEnvConfig`, `SetDefaults`). On every start `validateUserInfo` resets the `admin` user's password to it unless it is empty or `admin`: [cmd/root.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/cmd/root.go), [cmd/user.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/cmd/user.go), [auth.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/auth.go) (`ConfigTriggersAdminPasswordReset`). A first password is only generated (and logged) when none is set: [state/bootstrap_admin_password.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/state/bootstrap_admin_password.go). The database path: [database_paths.go](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/database_paths.go)
+* TrueNAS's Apps preset: `aclmode=PASSTHROUGH`, the `NFS4_RESTRICTED` ACL (owner@ Full Control, group@ Modify, both inherited) plus user 568 Modify: [pool_/dataset.py](https://github.com/truenas/middleware/blob/release/25.10.8/src/middlewared/middlewared/plugins/pool_/dataset.py), [the NFS4_RESTRICTED template](https://github.com/truenas/middleware/blob/release/25.10.8/src/middlewared/middlewared/alembic/versions/22.02/2021-08-26_14-35_add-acl-templates.py). What `aclmode` means for `chmod` (passthrough allows it; setgid needs it): [OpenZFS zfsprops(7)](https://openzfs.github.io/openzfs-docs/man/master/7/zfsprops.7.html)
 * LinuxServer qBittorrent: [init script](https://github.com/linuxserver/docker-qbittorrent/blob/master/root/etc/s6-overlay/s6-rc.d/init-qbittorrent-config/run) (defaults only copied when there is no `qBittorrent.conf`), [defaults/qBittorrent.conf](https://github.com/linuxserver/docker-qbittorrent/blob/master/root/defaults/qBittorrent.conf), [Dockerfile](https://github.com/linuxserver/docker-qbittorrent/blob/master/Dockerfile) (`HOME=/config`)
 * qBittorrent settings migrations (migration 11 moves the web UI login to `[WebUI]`): [src/app/upgrade.cpp at release-5.3.0](https://github.com/qbittorrent/qBittorrent/blob/release-5.3.0/src/app/upgrade.cpp)
 * LinuxServer Jackett listens on 9117 (its service waits for `nc -z localhost 9117`): [svc-jackett/run](https://github.com/linuxserver/docker-jackett/blob/master/root/etc/s6-overlay/s6-rc.d/svc-jackett/run); FlareSolverr's `PORT` (default 8191): [src/flaresolverr.py](https://github.com/FlareSolverr/FlareSolverr/blob/master/src/flaresolverr.py)

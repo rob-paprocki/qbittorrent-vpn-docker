@@ -14,8 +14,9 @@
 #     settings you enter;
 #   * qBittorrent (password, Jackett search plugin) and Jackett (API key)
 #     are seeded with the repository's own seeding CLI, run by DSM's python3
-#     (or a throwaway python container if that fails). FileBrowser makes its
-#     own first-run password, which is read from its log and printed;
+#     (or a throwaway python container if that fails). FileBrowser needs no
+#     seeding: compose.yaml gives its user "admin" the qBittorrent password
+#     at every start, and keeps its database in configs/filebrowser;
 #   * the folder is registered as the Container Manager project
 #     "torrent-stack", so Container Manager > Project shows and manages it;
 #   * /dev/net/tun is loaded now, and a Task Scheduler boot-up task
@@ -86,9 +87,18 @@ readonly BOOT_LOG="/var/log/torrent-stack-boot.log"
 # Python's standard library.
 readonly SEED_IMAGE="python:3.14.9-slim-trixie@sha256:35caba83af2fe6da9a5d922f9b0156f21d1246a48278c58a08bd253303ba42e8"
 # The seeders to run. The CLI's third one, filebrowser, is left out: the
-# current FileBrowser image never reads the file it writes (README.md,
-# "FileBrowser"), and it is the only one that needs the bcrypt module.
+# current FileBrowser image never reads the file it writes, and compose.yaml
+# sets FileBrowser's admin password itself (FILEBROWSER_ADMIN_PASSWORD).
+# It is also the only seeder that needs the bcrypt module.
 readonly SEEDERS="jackett,qbit"
+# Jackett always listens on 9117 inside Gluetun's network, whatever
+# JACKETT_PORT (the port on the NAS) is, and qBittorrent shares that network.
+# So its search plugin is pointed at 127.0.0.1:9117.
+readonly JACKETT_INNER_PORT=9117
+# FileBrowser's image always runs as its own user, uid 1000 (group 1000),
+# whatever PUID is; compose.yaml adds the PGID group (group_add) so it can
+# reach the stack's folders through that group.
+readonly FB_UID=1000
 
 # DSM puts every local user in the "users" group (gid 100).
 readonly DEFAULT_PGID=100
@@ -184,8 +194,8 @@ Environment variables (all optional; they also pre-fill the questions):
   TS_VPN_PROVIDER (protonvpn), TS_VPN_TYPE (wireguard|openvpn),
   TS_WIREGUARD_ADDRESSES, TS_OPENVPN_USER, TS_SERVER_COUNTRIES,
   TS_QBITTORRENT_USER (admin)
-  TS_QBIT_WEBUI_PORT, TS_FILEBROWSER_PORT (JACKETT_PORT and FLARESOLVERR_PORT
-                             must stay 9117 and 8191: see the README)
+  TS_QBIT_WEBUI_PORT, TS_JACKETT_PORT, TS_FLARESOLVERR_PORT,
+  TS_FILEBROWSER_PORT        Ports on the NAS (8090, 9117, 8191, 8081)
   Secrets are read from files, never from the command line:
   TS_WIREGUARD_PRIVATE_KEY_FILE, TS_OPENVPN_PASSWORD_FILE,
   TS_QBITTORRENT_PASSWORD_FILE  (first line of the file; chmod 600 it)
@@ -1133,7 +1143,7 @@ wizard() {
   set_setting SERVER_COUNTRIES "$countries"
 
   echo
-  echo "  ${BOLD}qBittorrent login${CL} (FileBrowser makes its own admin password; it is shown at the end)."
+  echo "  ${BOLD}qBittorrent login${CL} (FileBrowser's user 'admin' gets the same password)."
   qbit_user=$(current QBITTORRENT_USER "admin")
   is_unset QBITTORRENT_USER "$qbit_user" && qbit_user="admin"
   ask qbit_user "qBittorrent username" "$qbit_user"
@@ -1182,23 +1192,31 @@ wizard() {
     [[ "$val" =~ ^[0-9]+$ && "$val" -ge 1 && "$val" -le 65535 ]] || die "${key} must be a port number (got '${val}')."
     set_setting "$key" "$val"
   done
-  check_ports "${SETTINGS[QBIT_WEBUI_PORT]}" "${SETTINGS[JACKETT_PORT]}" "${SETTINGS[FLARESOLVERR_PORT]}"
+  check_ports "${SETTINGS[QBIT_WEBUI_PORT]}" "${SETTINGS[JACKETT_PORT]}" "${SETTINGS[FLARESOLVERR_PORT]}" "${SETTINGS[FILEBROWSER_PORT]}"
   if [[ ! -f "$ENV_FILE" ]]; then
     set_setting COMPOSE_PROFILES ""
   fi
 }
 
-# check_ports QBIT JACKETT FLARESOLVERR: refuse ports this stack cannot use.
-# The repository's compose.yaml publishes each app port as HOST:SAME on the
-# gluetun container, but Jackett and FlareSolverr always listen on 9117 and
-# 8191 inside it, so any other JACKETT_PORT or FLARESOLVERR_PORT would
-# publish a port nothing answers on (and point qBittorrent's search plugin
-# at it). qBittorrent shares that network with Jackett, FlareSolverr and
-# Gluetun's own control (8000) and health (9999) servers, so its port must
-# not be one of those.
+# check_ports QBIT JACKETT FLARESOLVERR FILEBROWSER: refuse ports this
+# stack cannot use. All four are ports on the NAS. compose.yaml publishes
+# JACKETT_PORT to Jackett's 9117 and FLARESOLVERR_PORT to FlareSolverr's
+# 8191 (the ports they always listen on inside Gluetun's network), and
+# FILEBROWSER_PORT to FileBrowser's 80, so those three can be any free port.
+# QBIT_WEBUI_PORT is the same number on both sides (qBittorrent's web UI
+# refuses a Host header with another port), and inside Gluetun's network it
+# must not be one of the ports Jackett (9117), FlareSolverr (8191) and
+# Gluetun's own control (8000) and health (9999) servers listen on.
 check_ports() {
-  [[ "$2" == 9117 ]] || die "JACKETT_PORT must be 9117 (got $2): Jackett listens on 9117 inside its container, and this stack publishes the same port number on the host. Set it back to 9117."
-  [[ "$3" == 8191 ]] || die "FLARESOLVERR_PORT must be 8191 (got $3): FlareSolverr listens on 8191 inside its container, and this stack publishes the same port number on the host. Set it back to 8191."
+  local p name names=(QBIT_WEBUI_PORT JACKETT_PORT FLARESOLVERR_PORT FILEBROWSER_PORT) i=0
+  local -A seen=()
+  for p in "$@"; do
+    name=${names[i]}
+    i=$((i + 1))
+    [[ "$p" =~ ^[0-9]+$ ]] && ((10#$p >= 1 && 10#$p <= 65535)) || die "${name} must be a port number, 1 to 65535 (got '${p}')."
+    [[ -z "${seen[$p]:-}" ]] || die "${name} and ${seen[$p]} are both ${p}; each web UI needs its own port on the NAS."
+    seen[$p]=$name
+  done
   case "$1" in
   8000 | 8191 | 9117 | 9999) die "QBIT_WEBUI_PORT cannot be $1: qBittorrent shares Gluetun's network with Jackett (9117), FlareSolverr (8191) and Gluetun's own servers (8000, 9999). Pick another port, such as 8090." ;;
   esac
@@ -1280,58 +1298,132 @@ prepare_folders() {
 }
 
 fix_ownership() {
-  local d
+  local d fb="${CONFIG_PATH}/filebrowser"
   # Gluetun runs as root and keeps its own folder root-owned.
-  for d in qbittorrent jackett flaresolverr filebrowser; do
+  for d in qbittorrent jackett flaresolverr; do
     [[ -d "${CONFIG_PATH}/${d}" || "$DRY_RUN" == 1 ]] && run chown -R "${PUID}:${PGID}" "${CONFIG_PATH}/${d}"
   done
-  # Only the two download folders themselves, never what is already in them.
-  run chown "${PUID}:${PGID}" "$DOWNLOADS" "${DOWNLOADS}/incomplete"
+  # FileBrowser runs as its image's own user (uid 1000), not as PUID, and
+  # reaches its folder through the PGID group (group_add in compose.yaml).
+  # So the folder itself is PUID:PGID with group write, plus setgid so that
+  # what FileBrowser creates there keeps the PGID group. On DSM this chmod
+  # turns this one folder from DSM's (Windows ACL) permissions to plain Unix
+  # permissions, which is what it needs: otherwise FileBrowser would only get
+  # in if the users group had Read/Write on the whole docker shared folder.
+  # Never -R: FileBrowser owns its database files (mode 644), and changing
+  # their owner to PUID would leave its database read-only for it. A symlink
+  # in its place is left alone (chown and chmod would follow it).
+  if [[ "$DRY_RUN" == 1 ]] || [[ -d "$fb" && ! -L "$fb" ]]; then
+    run chown "${PUID}:${PGID}" "$fb"
+    run chmod 2775 "$fb"
+  fi
+  # Only the two download folders themselves, never what is already in them,
+  # and without following a symlink put in their place (-h). Their
+  # permissions are left to DSM: see check_write_access.
+  run chown -h "${PUID}:${PGID}" "$DOWNLOADS" "${DOWNLOADS}/incomplete"
+}
+
+# write_test USER GROUPS DIR...: in a throwaway container (no network) as
+# USER (uid:gid) with the extra GROUPS (empty for none), try to create a
+# file in each DIR. Prints the folders that failed; false when the check
+# itself could not run.
+write_test() {
+  local user=$1 groups=$2 d mounts=() extra=()
+  shift 2
+  for d in "$@"; do mounts+=(-v "${d}:${d}"); done
+  [[ -n "$groups" ]] && extra=(--group-add "$groups")
+  # $@ is expanded by the container's shell. Only the folders that failed
+  # are printed on stdout.
+  # shellcheck disable=SC2016
+  docker run --rm --network none --user "$user" ${extra[@]+"${extra[@]}"} "${mounts[@]}" --entrypoint /bin/sh "$SEED_IMAGE" \
+    -c 'for d in "$@"; do t="$d/.torrent-stack-write-test"; if touch "$t" 2>/dev/null; then rm -f "$t"; else echo "$d"; fi; done' \
+    check "$@" 2>"$TEMP_DIR/write-check.err"
+}
+
+# group_name GID: the local group's name ("users" for 100), else the gid.
+group_name() {
+  local n
+  n=$(awk -F: -v g="$1" '$3 == g { print $1; exit }' /etc/group 2>/dev/null) || n=""
+  echo "${n:-gid $1}"
 }
 
 # check_write_access: DSM shared folders carry their own permissions (ACLs)
-# on top of file ownership. Try writing as PUID:PGID, exactly as the apps
-# will, so a missing shared-folder permission shows up now and not as a
-# silent qBittorrent error later. Only warns.
+# on top of file ownership. Try writing exactly as the apps will, so a
+# missing shared-folder permission shows up now and not as a silent error
+# later. Only warns.
+#  - qBittorrent and Jackett run as PUID:PGID: they need their config
+#    folder and both download folders.
+#  - FileBrowser runs as uid 1000 with the PGID group added: it needs its
+#    config folder (else it cannot keep its users and settings), and, to
+#    upload, rename or delete, the downloads folder. The installer does not
+#    chmod the downloads: on DSM that would switch them, and every
+#    incomplete download moved into them, from DSM's shared-folder
+#    permissions to plain Unix ones (README.md, FileBrowser). Read/Write
+#    for the PGID group on the shared folder is the DSM way.
 check_write_access() {
   local dirs=("${CONFIG_PATH}/qbittorrent" "$DOWNLOADS" "${DOWNLOADS}/incomplete")
+  local fb_dirs=("${CONFIG_PATH}/filebrowser" "$DOWNLOADS")
+  local gname
+  gname=$(group_name "$PGID")
   if [[ "$DRY_RUN" == 1 ]]; then
     msg_dry "would check that ${PUID}:${PGID} can write to ${dirs[*]} (throwaway ${SEED_IMAGE%%@*} container, no network)"
+    msg_dry "would check that FileBrowser (uid ${FB_UID}, group ${PGID}) can write to ${fb_dirs[*]} (the same way)"
     return 0
   fi
-  local mounts=() d out
-  for d in "${dirs[@]}"; do mounts+=(-v "${d}:${d}"); done
+  local d out fb_out
   if ! docker image inspect "$SEED_IMAGE" >/dev/null 2>&1 &&
     ! docker pull -q "$SEED_IMAGE" >"$TEMP_DIR/write-check.err" 2>&1; then
     msg_warn "Could not pull ${SEED_IMAGE%%@*} for the write check: $(tr '\n' ' ' <"$TEMP_DIR/write-check.err")"
     return 0
   fi
-  # $@ is expanded by the container's shell. Only the folders that failed
-  # are printed on stdout.
-  # shellcheck disable=SC2016
-  if ! out=$(docker run --rm --network none --user "${PUID}:${PGID}" "${mounts[@]}" --entrypoint /bin/sh "$SEED_IMAGE" \
-    -c 'for d in "$@"; do t="$d/.torrent-stack-write-test"; if touch "$t" 2>/dev/null; then rm -f "$t"; else echo "$d"; fi; done' \
-    check "${dirs[@]}" 2>"$TEMP_DIR/write-check.err"); then
+  if ! out=$(write_test "${PUID}:${PGID}" "" "${dirs[@]}"); then
     msg_warn "Could not run the write check: $(tr '\n' ' ' <"$TEMP_DIR/write-check.err")"
     return 0
   fi
   if [[ -z "$out" ]]; then
     msg_ok "${DSM_USER:-uid ${PUID}} can write to the config and download folders"
-    return 0
-  fi
-  msg_warn "${DSM_USER:-uid ${PUID}} (PUID ${PUID}) cannot write to:"
-  local shares=""
-  while IFS= read -r d; do
-    printf '         %s\n' "$d"
-    d=$(share_root "$d")
-    [[ " $shares " == *" ${d##*/} "* ]] || shares="${shares:+$shares }${d##*/}"
-  done <<<"$out"
-  cat <<EOF
+  else
+    msg_warn "${DSM_USER:-uid ${PUID}} (PUID ${PUID}) cannot write to:"
+    local shares=""
+    while IFS= read -r d; do
+      printf '         %s\n' "$d"
+      d=$(share_root "$d")
+      [[ " $shares " == *" ${d##*/} "* ]] || shares="${shares:+$shares }${d##*/}"
+    done <<<"$out"
+    cat <<EOF
   Give that user Read/Write on the shared folder(s): ${shares}
     Control Panel > Shared Folder > select the folder > Edit > Permissions >
     Local users > ${DSM_USER:-the user} > Read/Write > Save.
   Then run: bash ${STACK_DIR}/platforms/synology/install.sh --apply
 EOF
+  fi
+
+  if ! fb_out=$(write_test "${FB_UID}:${FB_UID}" "$PGID" "${fb_dirs[@]}"); then
+    msg_warn "Could not run FileBrowser's write check: $(tr '\n' ' ' <"$TEMP_DIR/write-check.err")"
+    return 0
+  fi
+  if [[ -z "$fb_out" ]]; then
+    msg_ok "FileBrowser (uid ${FB_UID}, group ${gname}) can write to its config folder and the downloads"
+    return 0
+  fi
+  if grep -qxF "${CONFIG_PATH}/filebrowser" <<<"$fb_out"; then
+    msg_warn "FileBrowser (uid ${FB_UID}, group ${gname}) cannot write to its folder ${CONFIG_PATH}/filebrowser,"
+    echo "  so it cannot keep its users and settings. It should be owned by"
+    echo "  ${DSM_USER:-uid ${PUID}}, group ${gname}, mode drwxrwsr-x. Check: ls -ld ${CONFIG_PATH}/filebrowser"
+    echo "  Then run: bash ${STACK_DIR}/platforms/synology/install.sh --apply"
+  fi
+  if grep -qxF "$DOWNLOADS" <<<"$fb_out"; then
+    d=$(share_root "$DOWNLOADS")
+    msg_warn "FileBrowser (uid ${FB_UID}, group ${gname}) cannot change files in ${DOWNLOADS}."
+    cat <<EOF
+  It cannot upload, rename or delete there (and may not even list them).
+  To allow that, give the group ${gname} Read/Write on the shared folder ${d##*/}:
+    Control Panel > Shared Folder > select ${d##*/} > Edit > Permissions >
+    Local groups > ${gname} > Read/Write > Save.
+  (Every DSM user is in the users group; README.md, FileBrowser, has a
+  narrower way.) Or leave it: qBittorrent does not need it.
+EOF
+  fi
 }
 
 # stop_for_seeding: qBittorrent writes its settings back when it stops, so a
@@ -1349,9 +1441,11 @@ stop_for_seeding() {
 }
 
 # seed_configs: run the repository's seeding CLI. It reads .env and writes
-# qBittorrent's password hash and Jackett search plugin, and Jackett's API
-# key, into CONFIG_PATH. Secrets stay in .env; nothing is passed on a command
-# line. DSM 7 comes with python3 (no pip), which is all these two seeders
+# qBittorrent's password hash and Jackett search plugin (pointed at
+# 127.0.0.1:9117, where Jackett listens inside Gluetun's network, whatever
+# JACKETT_PORT is), and Jackett's API key, into CONFIG_PATH. Secrets stay
+# in .env; nothing is passed on a command line.
+# DSM 7 comes with python3 (no pip), which is all these two seeders
 # need. If it cannot run them, the pinned python image does, with the stack
 # folder (.env, the scripts) mounted read-only, only CONFIG_PATH writable,
 # and nothing installed into it.
@@ -1363,7 +1457,8 @@ seed_configs() {
   local cli="${STACK_DIR}/scripts/env-editor/seed_configs.py"
   if command -v python3 >/dev/null 2>&1; then
     msg_info "Seeding qBittorrent and Jackett (DSM's python3)"
-    if run python3 -I "$cli" --env "$ENV_FILE" --only "$SEEDERS" --as-user "${PUID}:${PGID}"; then
+    if run python3 -I "$cli" --env "$ENV_FILE" --only "$SEEDERS" --as-user "${PUID}:${PGID}" \
+      --jackett-port "$JACKETT_INNER_PORT"; then
       fix_ownership
       msg_ok "Seeded qBittorrent and Jackett"
       return 0
@@ -1374,7 +1469,7 @@ seed_configs() {
   msg_info "Seeding qBittorrent and Jackett (throwaway ${SEED_IMAGE%%@*} container)"
   [[ "$DRY_RUN" == 1 ]] || docker rm -f "${STACK}-seed" >/dev/null 2>&1 || true
   run docker run --rm --name "${STACK}-seed" "${mounts[@]}" --entrypoint python3 "$SEED_IMAGE" \
-    -I "$cli" --env "$ENV_FILE" --only "$SEEDERS" --as-user "${PUID}:${PGID}" ||
+    -I "$cli" --env "$ENV_FILE" --only "$SEEDERS" --as-user "${PUID}:${PGID}" --jackett-port "$JACKETT_INNER_PORT" ||
     die "Seeding failed (see above). It needs internet access for the Jackett search plugin (raw.githubusercontent.com)."
   fix_ownership
   msg_ok "Seeded qBittorrent and Jackett"
@@ -1861,48 +1956,15 @@ print_access() {
   show "Jackett" "http://${ip}:${jport}"
   show "FileBrowser" "http://${ip}:${fport}"
   show "qBittorrent login" "$(env_get "$ENV_FILE" QBITTORRENT_USER) / QBITTORRENT_PASSWORD in ${ENV_FILE}"
+  # compose.yaml sets FileBrowser's admin password from QBITTORRENT_PASSWORD
+  # (FILEBROWSER_ADMIN_PASSWORD) every time it starts; its user is "admin".
+  show "FileBrowser login" "admin / the same password (QBITTORRENT_PASSWORD)"
   if [[ -n "$QBIT_PW_GENERATED" ]]; then
     show "Generated password" "$QBIT_PW_GENERATED"
   fi
-  filebrowser_login
-}
-
-# filebrowser_password: the first-run admin password FileBrowser printed in
-# its log (empty when it has not, or is not running). The current FileBrowser
-# image keeps its settings and users in /home/filebrowser/data inside the
-# container, not in the configs folder, so it makes this password itself on
-# the first start of every new container; the seeding CLI's FileBrowser file
-# is never read (README.md, "FileBrowser").
-filebrowser_password() {
-  local id
-  id=$(container_of filebrowser)
-  [[ -n "$id" ]] || return 0
-  docker logs "$id" 2>&1 |
-    sed -n 's/.*[Gg]enerated initial admin password for user "admin"[^:]*:[[:space:]]*\([^[:space:]]*\).*/\1/p' |
-    tail -n 1 || true
-}
-
-filebrowser_login() {
-  local pw="" i
-  if [[ "$DRY_RUN" != 1 && -n "$(container_of filebrowser)" ]]; then
-    # It logs the password a second or two after it starts.
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      pw=$(filebrowser_password)
-      [[ -n "$pw" || "$i" == 10 ]] && break
-      sleep 2
-    done
-  fi
-  if [[ -n "$pw" ]]; then
-    show "FileBrowser login" "admin / ${pw}  (first-run password; FileBrowser asks you to change it)"
-  else
-    show "FileBrowser login" "admin / the first-run password in its log, once it runs:"
-    echo "                         Container Manager > Container > ${STACK}-filebrowser-1 > Details > Log"
-    echo "                         (the line 'Generated initial admin password')"
-  fi
-  echo "  FileBrowser keeps its users inside its container: when the container is"
-  echo "  recreated (--update, or Clean and Build in Container Manager) it starts"
-  echo "  over with a new first-run password, shown in its log the same way. It can"
-  echo "  show your downloads but not change them (see README.md, FileBrowser)."
+  echo "  Change both passwords by changing QBITTORRENT_PASSWORD (re-run this"
+  echo "  installer, or edit .env and run --apply): FileBrowser puts that password"
+  echo "  back every time it starts, also after a change in its own settings."
 }
 
 print_manage() {
@@ -2027,12 +2089,19 @@ do_apply() {
   if is_unset QBITTORRENT_USER "$qbit_user" || is_unset QBITTORRENT_PASSWORD "$qbit_pw"; then
     die "QBITTORRENT_USER/QBITTORRENT_PASSWORD in ${ENV_FILE} are still placeholders."
   fi
-  check_ports "$(env_get "$ENV_FILE" QBIT_WEBUI_PORT)" "$(env_get "$ENV_FILE" JACKETT_PORT)" "$(env_get "$ENV_FILE" FLARESOLVERR_PORT)"
+  # As in the wizard. It also keeps FileBrowser's admin password real:
+  # FileBrowser ignores an empty one or "admin" and keeps its old password.
+  [[ ${#qbit_pw} -ge 8 ]] || die "QBITTORRENT_PASSWORD in ${ENV_FILE} must be at least 8 characters (it is also FileBrowser's admin password)."
+  check_ports "$(env_get "$ENV_FILE" QBIT_WEBUI_PORT)" "$(env_get "$ENV_FILE" JACKETT_PORT)" \
+    "$(env_get "$ENV_FILE" FLARESOLVERR_PORT)" "$(env_get "$ENV_FILE" FILEBROWSER_PORT)"
   # Before anything runs a repository file as root (the seeding CLI next).
   secure_repo_files
   prepare_folders
   stop_for_seeding
   seed_configs
+  # Again, so that a shared-folder permission fixed after the install
+  # (as the warnings suggest) is confirmed.
+  check_write_access
   cm_register
   check_root_only
   ensure_tun_now
@@ -2059,6 +2128,10 @@ do_update() {
     SRC_DIR="$STACK_DIR"
     compose config -q || die "The updated compose.yaml does not work with your .env (see above). Nothing was restarted."
   fi
+  # The new compose.yaml may use the folders differently (FileBrowser's
+  # database now lives in configs/filebrowser, written through the PGID
+  # group), so set them up as --apply does.
+  prepare_folders
   cm_register
   check_root_only
   boot_task_register
@@ -2070,8 +2143,7 @@ do_update() {
     if [[ "$DRY_RUN" == 1 ]]; then
       msg_dry "would update the stack '${STACK}' as shown above"
     else
-      msg_ok "Stack '${STACK}' updated"
-      filebrowser_login
+      msg_ok "Stack '${STACK}' updated (FileBrowser's users and settings are kept in ${CONFIG_PATH}/filebrowser)"
     fi
   elif [[ "$DRY_RUN" == 1 ]]; then
     msg_dry "would update the files; the stack would not be started, because the VPN keys are not set yet"

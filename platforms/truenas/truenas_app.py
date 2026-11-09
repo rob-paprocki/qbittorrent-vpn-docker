@@ -84,24 +84,13 @@ NETNS_SERVICES = ("qbittorrent", "jackett", "flaresolverr")
 # then deletes the half-created app again.
 GATE_PROFILE = "vpn-not-configured"
 
-# gtsteffaniak/filebrowser runs as a fixed uid 1000 and ignores PUID
-# (its _docker/Dockerfile: `adduser -D -s /bin/true -u 1000 filebrowser`,
-# `USER filebrowser`). On TrueNAS the downloads usually belong to the apps
-# user (568), so FileBrowser gets PGID as an extra group (group_add) to be
-# able to read and manage them.
-FILEBROWSER_UID = 1000
-
-# Jackett and FlareSolverr do not follow the .env port: the LinuxServer
-# Jackett image listens on 9117 (its s6 service even waits for
-# `nc -z localhost 9117`), and FlareSolverr listens on 8191 unless its own
-# PORT variable says otherwise. So on TrueNAS only the host side of these
-# two published ports changes; inside Gluetun's network namespace they
-# stay 9117 and 8191 (which is also where qBittorrent's search plugin and
-# Jackett's FlareSolverr URL point).
-FIXED_CONTAINER_PORTS = {"JACKETT_PORT": 9117, "FLARESOLVERR_PORT": 8191}
-
 # Ports already taken inside Gluetun's network namespace, which the
-# qBittorrent web UI shares: Gluetun's own servers, Jackett and FlareSolverr.
+# qBittorrent web UI shares: Gluetun's own servers, and Jackett and
+# FlareSolverr, which always listen on 9117 and 8191 in there (the
+# LinuxServer Jackett image's service waits for `nc -z localhost 9117`;
+# FlareSolverr's PORT defaults to 8191). compose.yaml publishes them as
+# JACKETT_PORT:9117 and FLARESOLVERR_PORT:8191, so only the port on the
+# TrueNAS address follows those two settings.
 NETNS_TAKEN_PORTS = {8000: "Gluetun's control server", 9999: "Gluetun's health server",
                      9117: "Jackett", 8191: "FlareSolverr"}
 
@@ -259,7 +248,7 @@ def validate(values: dict[str, str], example: dict[str, str], *, need_paths: boo
         errors.append("the four web UI ports must all be different")
     # qBittorrent listens on QBIT_WEBUI_PORT inside Gluetun's network
     # namespace. (Jackett and FlareSolverr keep their fixed ports in there;
-    # see FIXED_CONTAINER_PORTS.)
+    # see NETNS_TAKEN_PORTS.)
     qport = ports.get("QBIT_WEBUI_PORT")
     if qport in NETNS_TAKEN_PORTS:
         errors.append(f"QBIT_WEBUI_PORT={qport} is taken by {NETNS_TAKEN_PORTS[qport]} "
@@ -412,36 +401,27 @@ def _inside(path: str, roots: list[str], strict: bool = False) -> bool:
     return False
 
 
-_SAME_PORT_RE = re.compile(r"^\$\{(?P<key>[A-Z_]+)\}:\$\{(?P=key)\}(?P<proto>/(?:tcp|udp))?$")
-
-
-def truenas_template(compose: dict) -> dict:
-    """compose.yaml as TrueNAS gets it, still with its ${VAR} references.
-
-    The one change at this stage: Gluetun publishes Jackett and FlareSolverr
-    as ${JACKETT_PORT}:9117 and ${FLARESOLVERR_PORT}:8191 instead of
-    ${PORT}:${PORT}, because those two apps do not move to the .env port
-    (see FIXED_CONTAINER_PORTS). render() and extract() both start from
-    this, so a port read back from the app's YAML is the host port."""
-    gl = (compose.get("services") or {}).get(GLUETUN)
-    if isinstance(gl, dict) and isinstance(gl.get("ports"), list):
-        new_ports = []
-        for item in gl["ports"]:
-            m = _SAME_PORT_RE.match(item) if isinstance(item, str) else None
-            if m and m.group("key") in FIXED_CONTAINER_PORTS:
-                item = (f"${{{m.group('key')}}}:{FIXED_CONTAINER_PORTS[m.group('key')]}"
-                        f"{m.group('proto') or ''}")
-            new_ports.append(item)
-        gl["ports"] = new_ports
-    return compose
-
-
 def load_template(repo: Path) -> dict:
+    """compose.yaml as it is in the repository, with its ${VAR} references.
+    render() fills them in; extract() reads them back from the app's YAML."""
     yaml = load_yaml_module()
     compose = yaml.safe_load((repo / "compose.yaml").read_text(encoding="utf-8"))
     if not isinstance(compose, dict) or not isinstance(compose.get("services"), dict):
         raise HelperError("compose.yaml has no services")
-    return truenas_template(compose)
+    return compose
+
+
+def _env_value(env, key: str) -> str:
+    """The value of key in a service's environment (a mapping or a
+    KEY=VALUE list, both allowed by Compose); empty when it is not set."""
+    if isinstance(env, dict):
+        value = env.get(key)
+        return "" if value is None else str(value)
+    if isinstance(env, list):
+        for item in env:
+            if isinstance(item, str) and item.startswith(key + "="):
+                return item[len(key) + 1:]
+    return ""
 
 
 def render(repo: Path, values: dict[str, str], source_dir: str,
@@ -531,36 +511,22 @@ def render(repo: Path, values: dict[str, str], source_dir: str,
             raise HelperError(f"{svc}: host path {src} is not inside a pool "
                               f"({', '.join(allowed_roots) or 'no pools found'})")
 
-    # 6. FileBrowser (FileBrowser Quantum, the :stable image) keeps its users
-    #    and settings in an SQLite database whose path comes from
-    #    FILEBROWSER_DATABASE_PATH; the image sets it to a folder that is
-    #    not mounted, so every redeploy (TrueNAS recreates the containers on
-    #    each update) would start from an empty database. Put it in the
-    #    config folder instead. FILEBROWSER_ADMIN_PASSWORD sets the password
-    #    of its admin user ("admin") on every start: here the qBittorrent
-    #    password, so there is no default or one-off login to find. (The
-    #    image reads its config file from /home/filebrowser/data, so the
-    #    seeding CLI's settings.yaml is not used on TrueNAS.)
-    #    It also runs as uid 1000 whatever PUID is: group_add lets it use
-    #    the PGID group's access to the downloads (see FILEBROWSER_UID).
+    # 6. FileBrowser: compose.yaml itself keeps its database (users, shares,
+    #    settings) in the mounted config folder (FILEBROWSER_DATABASE_PATH),
+    #    sets the "admin" password from QBITTORRENT_PASSWORD on every start
+    #    (FILEBROWSER_ADMIN_PASSWORD) and adds the PGID group (group_add),
+    #    so nothing is changed here. TrueNAS recreates every container on
+    #    each update, though, so a database outside the configs dataset
+    #    would be emptied every time: refuse a compose.yaml where that is so.
     fb = services.get("filebrowser")
     if isinstance(fb, dict):
-        conf_targets = [dst for svc, src, dst in binds
+        db_path = os.path.normpath(_env_value(fb.get("environment"), "FILEBROWSER_DATABASE_PATH") or "/")
+        conf_targets = [os.path.normpath(dst) for svc, src, dst in binds
                         if svc == "filebrowser" and _inside(src, [values["CONFIG_PATH"]], strict=True)]
-        if not conf_targets:
-            raise HelperError("compose.yaml: filebrowser has no folder under CONFIG_PATH mounted; "
-                              "its database would be lost on every update")
-        env = fb.get("environment")
-        if env is None:
-            env = fb["environment"] = {}
-        if not isinstance(env, dict):
-            raise HelperError("compose.yaml: filebrowser's environment must be a mapping")
-        env["FILEBROWSER_DATABASE_PATH"] = conf_targets[0].rstrip("/") + "/database.sqlite"
-        env["FILEBROWSER_ADMIN_PASSWORD"] = values["QBITTORRENT_PASSWORD"]
-        groups = [str(g) for g in fb.get("group_add", [])]
-        if values["PGID"] not in groups:
-            groups.append(values["PGID"])
-        fb["group_add"] = groups
+        if not _inside(db_path, conf_targets, strict=True):
+            raise HelperError("compose.yaml: filebrowser's FILEBROWSER_DATABASE_PATH is not inside "
+                              "a folder mounted from CONFIG_PATH; FileBrowser would lose its users "
+                              "and settings on every TrueNAS app update")
 
     # 7. Startup gating while the VPN settings are placeholders.
     missing = vpn_missing(values, example)
@@ -902,12 +868,8 @@ def cmd_call(args) -> int:
 def cmd_envfile(args) -> int:
     repo = Path(args.repo)
     values = load_values(args.values)
-    # The seeding CLI points qBittorrent's search plugin at
-    # http://127.0.0.1:${JACKETT_PORT}. That address is inside Gluetun's
-    # network namespace, where Jackett always listens on 9117 (see
-    # FIXED_CONTAINER_PORTS); JACKETT_PORT in the YAML is the host port.
-    for key, port in FIXED_CONTAINER_PORTS.items():
-        values[key] = str(port)
+    # The settings as they are. (install.sh tells the seeding CLI where
+    # Jackett listens inside Gluetun's network with --jackett-port.)
     env_io = repo_env_io(repo)
     # Create the file 0600 first; write_env then only rewrites its contents.
     write_private(args.out, "")
@@ -996,10 +958,11 @@ def cmd_qbit_webui_fix(args) -> int:
     qBittorrent 5.3 keeps its web UI settings in a [WebUI] section. Its
     settings migration 11 (src/app/upgrade.cpp) moves the old [Preferences]
     WebUI\\... keys there once, then records Meta\\MigrationVersion and never
-    looks at [Preferences] again. The seeding CLI writes the old keys, so a
-    re-seeded password (a qBittorrent login change) would be ignored once
-    qBittorrent has started. This does what the migration does: the seeded
-    [Preferences] value replaces the one in [WebUI]. Before the first start
+    looks at [Preferences] again. The seeding CLI writes the old keys (and,
+    in a migrated file, by now the [WebUI] login too), so without this a
+    re-seeded password could be ignored once qBittorrent has started. This
+    does what the migration does: the seeded [Preferences] values replace
+    the ones in [WebUI] and leave [Preferences]. Before the first start
     (no MigrationVersion yet) nothing is changed; qBittorrent migrates the
     keys itself then."""
     conf = Path(args.conf)

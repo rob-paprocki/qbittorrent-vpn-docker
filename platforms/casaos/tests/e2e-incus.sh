@@ -18,9 +18,12 @@
 #      registry), every app starts under CasaOS, the installer's own checks
 #      (shared network, every web UI, the qBittorrent login) pass, and the
 #      seeded logins work from the LAN: qBittorrent password, Jackett search
-#      plugin and API key, FlareSolverr, FileBrowser;
+#      plugin and API key, FlareSolverr, and FileBrowser's "admin" with the
+#      qBittorrent password (its database in its config folder, PGID added
+#      as a group);
 #   6. a password change with --apply reaches qBittorrent (5.x keeps it in a
-#      [WebUI] section the seeding CLI does not write);
+#      [WebUI] section) and FileBrowser, which keeps its database across
+#      the recreate;
 #   7. JACKETT_PORT / FLARESOLVERR_PORT only move the host port, and Jackett,
 #      FlareSolverr and the search plugin keep working;
 #   8. restarting the whole app through CasaOS (what the dashboard's Restart
@@ -134,6 +137,8 @@ check "Gluetun runs, the apps behind it were never started" gsh '
 check "nothing in Gluetun's network reaches the internet while the VPN is down" gsh '
   ! docker run --rm --network container:torrent-stack-gluetun-1 busybox:1.37 wget -q -T 8 -O /dev/null http://1.1.1.1/ &&
   ! docker run --rm --network container:torrent-stack-gluetun-1 busybox:1.37 wget -q -T 8 -O /dev/null http://deb.debian.org/'
+check "CasaOS's /DATA/Downloads is writable for qBittorrent and FileBrowser (no warning)" gsh "stat -c '%u:%g %a' /DATA/Downloads >/root/e2e-downloads-mode && ! grep -q 'may not be able to write there' /root/e2e-fresh.log"
+check "the incomplete folder: 1000:1000, 2775" gsh '[ "$(stat -c "%u:%g %a" /DATA/Downloads/incomplete)" = "1000:1000 2775" ]'
 check "app files: .env 0600, rendered app 0600" gsh '[ "$(stat -c %a /DATA/AppData/torrent-stack/.env)" = 600 ] && [ "$(stat -c %a /DATA/AppData/torrent-stack/casaos-app.yml)" = 600 ]'
 
 section "3. Re-run, --apply, --dry-run, --print-yaml"
@@ -193,8 +198,20 @@ check "qBittorrent: Jackett search plugin installed and enabled" bash -c "curl -
 KEY=$(gsh "sed -n 's/.*\"APIKey\": *\"\([^\"]*\)\".*/\1/p' /DATA/AppData/torrent-stack/configs/jackett/Jackett/ServerConfig.json")
 check "Jackett: the seeded API key works" bash -c "curl --noproxy '*' -sS -m 15 'http://$IP:9117/api/v2.0/indexers/all/results/torznab/api?apikey=$KEY&t=caps' | grep -q '<caps>'"
 check "FlareSolverr answers" bash -c "curl --noproxy '*' -sS -m 15 'http://$IP:8191/' | grep -q 'FlareSolverr is ready'"
-FB_PW=$(gsh "docker logs torrent-stack-filebrowser-1 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | sed -n 's/.*[Gg]enerated initial admin password for user \"[^\"]*\"[^:]*:[[:space:]]*\([^[:space:]]*\).*/\1/p' | tail -n1")
-check "FileBrowser: the first-run password from its log is accepted" bash -c "code=\$(curl --noproxy '*' -sS -m 15 -o /dev/null -w '%{http_code}' -X POST -H 'X-Password: $FB_PW' 'http://$IP:8081/api/auth/login?username=admin'); [ \"\$code\" = 200 ] || [ \"\$code\" = 403 ]"
+# fb_login PASSWORD: HTTP status of a LAN login to FileBrowser as "admin".
+fb_login() { code -X POST -H "X-Password: $1" "http://$IP:8081/api/auth/login?username=admin"; }
+wait_fb() { for _ in $(seq 1 60); do [[ "$(code "http://$IP:8081/health")" == 200 ]] && return 0; sleep 2; done; return 1; }
+# fb_admin_id: FileBrowser's "admin" user in its database on the box (a new
+# database would give it a new random id).
+fb_admin_id() { gsh "python3 -I -c 'import sqlite3; c=sqlite3.connect(\"file:/DATA/AppData/torrent-stack/configs/filebrowser/database.sqlite?mode=ro\", uri=True); print(c.execute(\"select user_id from users where username=?\", (\"admin\",)).fetchone()[0])'"; }
+wait_fb || true
+check "FileBrowser: admin with the qBittorrent password logs in from the LAN" test "$(fb_login "$QB_PASS")" == 200
+check "FileBrowser: a wrong password is refused" test "$(fb_login wrong-pass)" == 401
+check "FileBrowser: its database is in its config folder on the box" gx test -s /DATA/AppData/torrent-stack/configs/filebrowser/database.sqlite
+check "FileBrowser: config folder 1000:1000, 2775 (group-writable, setgid)" gsh '[ "$(stat -c "%u:%g %a" /DATA/AppData/torrent-stack/configs/filebrowser)" = "1000:1000 2775" ]'
+check "FileBrowser: CasaOS kept group_add (PGID) on the container" gsh '[ "$(docker inspect -f "{{json .HostConfig.GroupAdd}}" torrent-stack-filebrowser-1)" = "[\"1000\"]" ]'
+check "FileBrowser: the summary names its login without reading its log" gx grep -q 'FileBrowser login: *user admin, the qBittorrent password' /root/e2e-functional.log
+FB_ID=$(fb_admin_id 2>/dev/null || true)
 
 ENV=/DATA/AppData/torrent-stack/.env
 INST="bash /DATA/AppData/torrent-stack/platforms/casaos/install.sh"
@@ -208,6 +225,10 @@ wait_ui || true
 check "LAN login with the new password works" test "$(qb_login "$QB_NEW")" == 204
 check "LAN login with the old password is refused" test "$(qb_login "$QB_PASS")" == 401
 check "Gluetun's port script got the new password too" gsh "docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' torrent-stack-gluetun-1 | grep -qx 'QBITTORRENT_PASSWORD=$QB_NEW'"
+wait_fb || true
+check "FileBrowser: the new password logs in" test "$(fb_login "$QB_NEW")" == 200
+check "FileBrowser: the old password is refused" test "$(fb_login "$QB_PASS")" == 401
+check "FileBrowser: same database after the recreate (same admin user id)" test -n "$FB_ID" -a "$FB_ID" == "$(fb_admin_id 2>/dev/null || true)"
 
 section "7. JACKETT_PORT=9118, FLARESOLVERR_PORT=8192 (host side only)"
 gsh "sed -i -e 's/^JACKETT_PORT=.*/JACKETT_PORT=9118/' -e 's/^FLARESOLVERR_PORT=.*/FLARESOLVERR_PORT=8192/' $ENV"

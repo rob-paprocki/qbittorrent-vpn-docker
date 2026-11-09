@@ -7,9 +7,10 @@ One command over SSH does all of this:
 - puts the repository in a project folder, by default `/volume1/docker/torrent-stack`;
 - writes `.env` with absolute paths, the user id (PUID) of the DSM user you choose, PGID 100 (DSM's `users` group), your time zone, and your VPN and qBittorrent settings;
 - seeds qBittorrent's password and the Jackett API key and search plugin, so you can log straight in to qBittorrent;
+- prepares FileBrowser's folder, so FileBrowser keeps its users and settings; it logs in as `admin` with the same password as qBittorrent (see [FileBrowser](#filebrowser));
 - adds the folder to Container Manager as the project `torrent-stack`;
 - loads the `tun` kernel module now, and creates a Task Scheduler boot task (**Torrent stack boot**) that loads it at every boot and restarts the stack if DSM's own boot start left it half up;
-- starts the stack, once the VPN keys are filled in, and shows you FileBrowser's first-run password (FileBrowser makes its own; see [FileBrowser](#filebrowser)).
+- starts the stack, once the VPN keys are filled in.
 
 The security property is the same as everywhere else: qBittorrent, Jackett and FlareSolverr live inside Gluetun's network (`network_mode: service:gluetun`), so they can only reach the internet through the VPN. If Gluetun or the VPN is down, they have no internet at all.
 
@@ -21,7 +22,7 @@ You need:
 2. **Container Manager** from Package Center. Installing it creates the `docker` shared folder. Container Manager 24.0.2-1543 or later is best (it has the `docker compose` command); older versions work with their `docker-compose`.
 3. **SSH** turned on: Control Panel > Terminal & SNMP > Terminal > tick **Enable SSH service**.
 4. **A shared folder for downloads**, for example `downloads` (Control Panel > Shared Folder > Create). The installer only makes folders *inside* shared folders; it never creates a shared folder itself. Keep the downloads apart from the project folder: the installer refuses a downloads folder inside the project folder, or a project folder inside the downloads. Folder names may only use letters, digits, `.`, `_` and `-` (no spaces).
-5. **A DSM user for the apps.** The apps run as this user and own what they download. A dedicated user is best, for example `torrents` (Control Panel > User & Group > Create). Give it **Read/Write** on the `docker` and `downloads` shared folders (Control Panel > Shared Folder > select the folder > Edit > Permissions). Your own user also works. Do not give Read/Write on the `docker` shared folder to anyone else: Container Manager runs what is in there as root.
+5. **A DSM user for the apps.** The apps run as this user and own what they download. A dedicated user is best, for example `torrents` (Control Panel > User & Group > Create). Give it **Read/Write** on the `docker` and `downloads` shared folders (Control Panel > Shared Folder > select the folder > Edit > Permissions). Your own user also works. Do not give Read/Write on the `docker` shared folder to anyone else: Container Manager runs what is in there as root. (FileBrowser runs as its own user with the `users` group; to upload, rename or delete in FileBrowser, that group needs Read/Write on the downloads shared folder. The installer checks it and tells you; see [FileBrowser](#filebrowser).)
 6. **A VPN provider that Gluetun supports, with port forwarding**: ProtonVPN, Private Internet Access, Perfect Privacy or PrivateVPN. Others connect, but nothing will seed (see the main [README](../../README.md)).
 7. An Intel/AMD (x86_64) or ARM64 NAS. Older 32-bit ARM models cannot run all the images.
 
@@ -49,7 +50,7 @@ You need:
    | DSM user name | The user from step 5 above. Its id becomes `PUID`; `PGID` is 100. |
    | Time zone | For example `Europe/Berlin`. |
    | VPN provider, protocol, keys, address, countries | From your VPN provider's WireGuard (or OpenVPN) config. Leave the key empty to fill it in later; the stack then waits. |
-   | qBittorrent username and password | Leave the password empty to have one generated (it is printed at the end). |
+   | qBittorrent username and password | Leave the password empty to have one generated (it is printed at the end). At least 8 characters. FileBrowser's user `admin` gets the same password. |
 
 4. Check the summary, answer **Y**, and wait. The first start downloads the images, which takes a few minutes.
 
@@ -59,7 +60,9 @@ You need:
    - Jackett: `http://<nas-ip>:9117`
    - FileBrowser: `http://<nas-ip>:8081`
 
-   qBittorrent uses the login you entered; the password is also in `.env` (`QBITTORRENT_PASSWORD`). FileBrowser's login is user `admin` with the first-run password the installer prints at the end. FileBrowser asks you to choose a new one when you first log in. See [FileBrowser](#filebrowser).
+   qBittorrent uses the login you entered; the password is also in `.env` (`QBITTORRENT_PASSWORD`). FileBrowser's login is user **`admin`** with **the same password**. See [FileBrowser](#filebrowser).
+
+   These are the default ports on the NAS. To use others, give `TS_QBIT_WEBUI_PORT`, `TS_JACKETT_PORT`, `TS_FLARESOLVERR_PORT` or `TS_FILEBROWSER_PORT` when you run the installer, or change `QBIT_WEBUI_PORT`, `JACKETT_PORT`, `FLARESOLVERR_PORT` or `FILEBROWSER_PORT` in `.env` and run `--apply`. Each needs its own port. Inside the stack Jackett always listens on 9117 and FlareSolverr on 8191, whatever you pick, so qBittorrent's port cannot be 9117, 8191, 8000 or 9999 (those are taken inside Gluetun's network).
 
 To see every step without changing anything, add `--dry-run`:
 
@@ -74,7 +77,8 @@ It prints the `.env` it would write (secrets masked), every command, and every r
 | What | Where |
 |---|---|
 | The repository's files, `compose.yaml`, `.env` (all owned by root and changeable only by root; `.env` also unreadable for others, mode 600) | `/volume1/docker/torrent-stack` |
-| App configs (qBittorrent, Jackett, FlareSolverr, FileBrowser owned by your DSM user; Gluetun by root) | `/volume1/docker/torrent-stack/configs` |
+| App configs (qBittorrent, Jackett, FlareSolverr owned by your DSM user; Gluetun by root) | `/volume1/docker/torrent-stack/configs` |
+| FileBrowser's folder: its database (users, settings, shares). The folder is owned by your DSM user and the `users` group, mode `drwxrwsr-x` (2775), so FileBrowser can write it through the group; what FileBrowser writes there stays its own | `/volume1/docker/torrent-stack/configs/filebrowser` |
 | Downloads | the folder you chose, plus `incomplete/` |
 | Container Manager project `torrent-stack` | Container Manager > Project |
 | Task Scheduler boot task **Torrent stack boot** (runs as root at boot-up) | Control Panel > Task Scheduler |
@@ -125,30 +129,36 @@ vi /volume1/docker/torrent-stack/.env
 bash /volume1/docker/torrent-stack/platforms/synology/install.sh --apply
 ```
 
-`--apply` checks `.env` with Docker Compose, re-seeds qBittorrent and Jackett (stopping qBittorrent first, so it cannot write its old password back), starts or updates the stack, and makes sure the apps are inside Gluetun's network. It refuses an `.env` whose downloads folder is inside the project folder (or around it).
+`--apply` checks `.env` with Docker Compose, re-seeds qBittorrent and Jackett (stopping qBittorrent first, so it cannot write its old password back), checks again that the apps can write to their folders, starts or updates the stack, and makes sure the apps are inside Gluetun's network. It refuses an `.env` whose downloads folder is inside the project folder (or around it), two web UIs on the same port, and a `QBITTORRENT_PASSWORD` shorter than 8 characters.
+
+A new `QBITTORRENT_PASSWORD` is also FileBrowser's new `admin` password: Compose recreates the FileBrowser container with it, and its users and settings stay.
 
 The repository's web `.env` editor (`scripts/setup.sh`) needs a Python with the `venv` and `ensurepip` modules, which DSM's built-in `python3` does not have; the installer only mentions it if it finds one.
 
 ## First-run seeding
 
-The seeding is the repository's own seeding CLI (`scripts/env-editor/seed_configs.py`), the same code the env-editor runs on **Apply**, limited to qBittorrent (password hash, Jackett search plugin) and Jackett (API key). DSM 7 comes with `python3` (Python 3.8 according to user reports, without pip), and that is all these two need, so the installer runs the CLI with it. It reads the passwords from `.env` as root, then switches to the app user (`PUID:PGID`) before it writes anything, so a link planted in an app's config folder can never make root overwrite another file. None of the passwords is put on a command line.
+The seeding is the repository's own seeding CLI (`scripts/env-editor/seed_configs.py`), the same code the env-editor runs on **Apply**, limited to qBittorrent (password hash, Jackett search plugin) and Jackett (API key). The search plugin is pointed at `http://127.0.0.1:9117`: qBittorrent shares Gluetun's network with Jackett, which listens on 9117 there whatever `JACKETT_PORT` (the port on the NAS) is. DSM 7 comes with `python3` (Python 3.8 according to user reports, without pip), and that is all these two need, so the installer runs the CLI with it. It reads the passwords from `.env` as root, then switches to the app user (`PUID:PGID`) before it writes anything, so a link planted in an app's config folder can never make root overwrite another file. None of the passwords is put on a command line.
 
 If DSM's `python3` cannot run it, the installer uses a throwaway `python:3.14.9-slim-trixie` container (pinned by tag and digest) instead. Nothing is installed into that container; the project folder and `.env` are mounted into it read-only, and only the configs folder is writable. Both ways need internet access once, to download the Jackett search plugin for qBittorrent; the download is checked against the commit and sha256 pinned in `native/versions.env` and refused if it differs.
 
-The CLI's third seeder, FileBrowser's admin login, is not used here, because the current FileBrowser image never reads the file it writes (next section).
+The CLI's third seeder, FileBrowser's admin login, is not used here: the current FileBrowser image never reads the file it writes, and `compose.yaml` gives FileBrowser its password directly (next section).
 
 ## FileBrowser
 
-The current FileBrowser image (`ghcr.io/gtsteffaniak/filebrowser:stable`, v2.0.2-stable when this was written) behaves differently from what this repository's `compose.yaml` and seeding CLI expect. This affects every Docker platform of the repository, and a fix in `compose.yaml` has been asked for. Until then, on DSM:
+FileBrowser (`ghcr.io/gtsteffaniak/filebrowser:stable`, FileBrowser Quantum v2.0.2-stable when this was written) shows your downloads folder in the browser, at `http://<nas-ip>:8081`.
 
-- **Login:** user `admin`, with a **first-run password** that FileBrowser makes itself and writes to its log. The installer reads it from there and prints it (`FileBrowser login: admin / ...`). FileBrowser asks you to choose a new password when you first log in. To see the first-run password again: Container Manager > Container > `torrent-stack-filebrowser-1` > Details > Log, the line `Generated initial admin password`, or over SSH:
+- **Login:** user **`admin`**, password **`QBITTORRENT_PASSWORD`** from `.env` (the qBittorrent password). `compose.yaml` passes it as `FILEBROWSER_ADMIN_PASSWORD`, and FileBrowser sets the `admin` user's password from it **every time it starts**. The user name is always `admin`, even if your qBittorrent user has another name.
+- **To change the password**, change the qBittorrent password: run the installer again, or edit `QBITTORRENT_PASSWORD` in `.env` and run `install.sh --apply`. A password you change in FileBrowser's own settings works only until FileBrowser next starts; then the one from `.env` is back. Other users you add in FileBrowser keep their passwords.
+- **What it keeps:** its database, `configs/filebrowser/database.sqlite`, holds its users, settings and shares. It survives restarts, reboots, `install.sh --update`, and Clean and Build in Container Manager. Its configuration file is the image's own (`/home/filebrowser/data/config.yaml`: the downloads appear under `/srv/downloads`, password login, passwords of at least 5 characters).
+- **Its folder.** The image always runs as its own user, uid 1000, whatever `PUID` is; `compose.yaml` adds the `PGID` group (100, `users`) so it can use the stack's folders through that group. The installer makes `configs/filebrowser` owned by your DSM user and the `users` group with mode `drwxrwsr-x` (2775: the group may write, and new files keep the group). On DSM, setting a mode with `chmod` switches a folder from DSM's own (Windows ACL) permissions to plain Unix permissions ([Synology](https://kb.synology.com/en-us/DSM/tutorial/Revert_to_Windows_ACL_permission)). That is intended here, and only for this one folder: otherwise FileBrowser would only get in if the `users` group had Read/Write on the whole `docker` shared folder. The installer never changes the owner of the files FileBrowser writes there (if they belonged to your DSM user, FileBrowser could no longer write its own database).
+- **Changing your downloads (upload, rename, delete).** FileBrowser can do that only where its group may write. The installer does **not** `chmod` your downloads: on DSM that would switch them, and every download moved into them from `incomplete/`, to plain Unix permissions, and change who can reach them over the network. Instead it checks what FileBrowser can do and, if it cannot change the downloads, prints this:
 
-  ```bash
-  docker logs torrent-stack-filebrowser-1 2>&1 | grep -i "initial admin password"
+  ```
+  [WARN] FileBrowser (uid 1000, group users) cannot change files in /volume1/downloads.
   ```
 
-- **Its users and settings live inside the container**, not in `configs/filebrowser` (the image keeps them in `/home/filebrowser/data`). Stopping and starting keeps them. When the container is **recreated** (`install.sh --update`, or Clean and Build in Container Manager), FileBrowser starts over with a new first-run password, shown in its log the same way.
-- **It cannot change your downloads.** The image runs as its own user (uid 1000), not as your DSM user, so it can show the downloads folder but cannot upload, rename or delete anything in it. Use File Station for that.
+  To allow it, give the group Read/Write on the shared folder: Control Panel > Shared Folder > select `downloads` > Edit > Permissions > choose **Local groups** in the drop-down > `users` > tick **Read/Write** > Save ([Synology](https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/file_share_privilege?version=7)). Then run `install.sh --apply`; it checks again. Every DSM user is in the `users` group, so this lets every DSM user change that shared folder too. For a narrower way, create a group (Control Panel > User & Group > Group > Create, for example `torrents`) with only the apps' user in it, give that group Read/Write on the downloads shared folder, and run the installer again with `TS_PGID` set to its number (`grep '^torrents:' /etc/group | cut -d: -f3`). If you leave it as it is, FileBrowser may only show the downloads, or nothing, depending on what the shared folder allows the `users` group; qBittorrent does not need it, and File Station can do the same.
+- **Analytics:** FileBrowser Quantum has an anonymous usage report that is **off** until an administrator turns it on in its settings ([source](https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/state/analytics.go)). Leave it off if you do not want it.
 
 ## Updates
 
@@ -158,7 +168,7 @@ Container Manager has no automatic updater: it marks images with a newer `latest
 bash /volume1/docker/torrent-stack/platforms/synology/install.sh --update
 ```
 
-It downloads a fresh copy of the repository (with `git` if the Git Server package is installed, otherwise as a `.tar.gz` with `curl`) and copies its files over the project folder. `.env`, `.env.bak`, `configs/` and `downloads/` are never touched. The project folder is deliberately not a git checkout: `configs/` holds two files git tracks, which the seeding and the apps rewrite, and that would make every later `git pull` fail. If you cloned the repository with git yourself (the main README's way) and then ran this installer, `git status` will list the repository files as changed after an update. That is expected; keep using `--update`, not `git pull`. Add `--dry-run` to see what an update would change, including the request it would send to Container Manager.
+It downloads a fresh copy of the repository (with `git` if the Git Server package is installed, otherwise as a `.tar.gz` with `curl`) and copies its files over the project folder. `.env`, `.env.bak`, `configs/` and `downloads/` are never overwritten; as with `--apply`, the config folders' owners and FileBrowser's folder mode are set again, and the files FileBrowser keeps (its users and settings) stay as they are. The project folder is deliberately not a git checkout: `configs/` holds two files git tracks, which the seeding and the apps rewrite, and that would make every later `git pull` fail. If you cloned the repository with git yourself (the main README's way) and then ran this installer, `git status` will list the repository files as changed after an update. That is expected; keep using `--update`, not `git pull`. Add `--dry-run` to see what an update would change, including the request it would send to Container Manager.
 
 To run it automatically: Control Panel > Task Scheduler > Create > Scheduled Task > User-defined script, user **root**, a weekly schedule, and as the script `bash /volume1/docker/torrent-stack/platforms/synology/install.sh --update --unattended`.
 
@@ -203,6 +213,9 @@ All variables are listed by `install.sh --help`: `TS_STACK_DIR`, `TS_DOWNLOADS`,
 - **The project shows no containers or "stopped" in Container Manager while the web UIs work**: Container Manager may not have noticed containers started from SSH. Select the project, **Action > Build**, then **Start**; it is the same Compose project, so nothing is duplicated.
 - **The installer could not add the project or the boot task** (it prints "by hand" steps): follow those steps once in DSM. They do exactly what the installer would have done. Use the project name `torrent-stack` exactly: it is the Compose project name in `compose.yaml`, and another name would start a second copy.
 - **"cannot write to"** warning: the DSM user lacks permission on a shared folder. Give it Read/Write (Control Panel > Shared Folder > Edit > Permissions), then `install.sh --apply`.
+- **"FileBrowser ... cannot change files in"** warning: see [FileBrowser](#filebrowser), "Changing your downloads". It only matters if you want to upload, rename or delete in FileBrowser.
+- **"FileBrowser ... cannot write to its folder"** warning: FileBrowser cannot keep its users and settings. `ls -ld /volume1/docker/torrent-stack/configs/filebrowser` should show `drwxrwsr-x`, your DSM user and `users`; `install.sh --apply` sets that again.
+- **FileBrowser does not take your password**: its user is `admin` (not your qBittorrent user name) and its password is `QBITTORRENT_PASSWORD` from `.env`, also after you changed it in FileBrowser (it is put back at every start). Its log (Container Manager > Container > `torrent-stack-filebrowser-1` > Details > Log) should say `Using admin password from FILEBROWSER_ADMIN_PASSWORD environment variable`.
 - **The boot log says "only loaded tun" or "is not root-only"**: the boot task found `boot.sh`, `compose.yaml`, `.env` or `update-qbittorrent.sh` changeable by someone other than root (or missing), so it did not run them as root. See [the boot task](#the-tun-device-and-the-boot-task); `install.sh --update` puts the files back as root-only.
 - **"holds another application's compose.yaml"**: the project folder you gave belongs to another Container Manager project. Pick an empty or new folder, or the folder of this stack.
 - **"is an older copy of this repository"**: you cloned the repository there earlier (the main README's way). The installer replaces its repository files with a fresh download and keeps `.env` and `configs/`. If your `.env` keeps the downloads in `./downloads`, move them to a folder outside the project folder first: the installer asks for one.
@@ -214,12 +227,12 @@ All variables are listed by `install.sh --help`: `TS_STACK_DIR`, `TS_DOWNLOADS`,
 
 - The Container Manager and Task Scheduler requests are the ones DSM's web UI sends (`SYNO.Docker.Project` and `SYNO.Core.EventScheduler`, called locally as root with `synowebapi`). Synology does not document them publicly. The parameters follow the third-party documentation and field reports listed below. If your DSM answers differently, the installer prints the by-hand steps and carries on, and if Container Manager writes `compose.yaml` differently from the repository's, the installer puts the repository's version back.
 - `--uninstall` without `--purge` does not remove the Container Manager project entry or the boot task: the project's Delete can remove the folder's files, so they are left for you to remove in DSM. `--purge` removes both through the API (`SYNO.Docker.Project delete`, `SYNO.Core.EventScheduler delete`); neither request has been tried on a real DSM.
-- FileBrowser makes its own first-run password, keeps its users inside its container and cannot change the downloads (see [FileBrowser](#filebrowser)). That needs a change in the repository's `compose.yaml`.
+- FileBrowser's user is always `admin`, and its password always follows `QBITTORRENT_PASSWORD`: a password changed in FileBrowser itself is put back at its next start. It changes your downloads only once its group has Read/Write on the downloads shared folder, which the installer leaves for you to set (see [FileBrowser](#filebrowser)). qBittorrent creates its files without write access for the group (the image's default umask), so even then FileBrowser may not be able to change everything inside the folders qBittorrent made, depending on how DSM applies the shared folder's permissions to them.
 - The boot task's "root-only" check reads ordinary file ownership and permissions. DSM's shared-folder permissions (ACLs) can let others change a file whatever those say; that is why only administrators and the app user should have Read/Write on the `docker` shared folder.
 - Folder paths may only use letters, digits, `.`, `_`, `-` and `/`, because the project folder ends up in the command the boot task runs as root.
 - A project folder on an encrypted shared folder that is not mounted at boot leaves the boot task without its script until you unlock it (it still loads `tun`).
 - The web `.env` editor does not run on DSM's built-in Python (see Changing settings).
-- `JACKETT_PORT` and `FLARESOLVERR_PORT` must stay 9117 and 8191. The repository's `compose.yaml` publishes each port as the same number on the NAS, and Jackett and FlareSolverr always listen on 9117 and 8191 inside their containers, so any other value would publish a port nothing answers on. The installer and `--apply` refuse other values, and refuse a `QBIT_WEBUI_PORT` of 8000, 8191, 9117 or 9999 (used inside Gluetun's network). This needs a change in `compose.yaml` to lift.
+- `QBIT_WEBUI_PORT` is the same number on the NAS and inside the stack (qBittorrent's web UI refuses a request for another port), so it cannot be 8000, 8191, 9117 or 9999, which are used inside Gluetun's network. The installer and `--apply` refuse those, and two web UIs on the same port.
 - No Discord webhook is set by default (the `.env.example` placeholder becomes empty). Give one with `TS_SCRIPT_NOTIFY_URL_FILE=/root/webhook.txt` (a `chmod 600` file) or put it in `.env` as `SCRIPT_NOTIFY_URL`.
 
 ## What was tested, and what was not
@@ -227,23 +240,25 @@ All variables are listed by `install.sh --help`: `TS_STACK_DIR`, `TS_DOWNLOADS`,
 Tested (`platforms/synology/tests/run-tests.sh`):
 
 - `bash -n` and `shellcheck -S warning` on `install.sh`, `boot.sh`, the test runner and the shell shims: clean.
-- 237 checks (all passed on the last run) in a throwaway, privileged Debian 13 Incus container shaped like DSM 7.2: `/etc.defaults/VERSION`, the `docker` and `downloads` shared folders, a DSM user (uid 1026, group 100), `/lib/modules/tun.ko`, a `python3` without bcrypt or pip, and shims in DSM's own paths for `synowebapi`, `synopkg`, `docker`/`docker-compose` and `insmod`. The docker shim runs the real docker-compose for every compose call it validates and runs containers as real processes in real network namespaces. The `synowebapi` shim only accepts JSON-encoded parameters and DSM's task-name rules. Covered:
+- 283 checks (all passed on the last run) in a throwaway, privileged Debian 13 Incus container shaped like DSM 7.2: `/etc.defaults/VERSION`, the `docker` and `downloads` shared folders, a DSM user (uid 1026, group 100), `/lib/modules/tun.ko`, a `python3` without bcrypt or pip, and shims in DSM's own paths for `synowebapi`, `synopkg`, `docker`/`docker-compose` and `insmod`. The docker shim runs the real docker-compose for every compose call it validates and runs containers as real processes in real network namespaces. The `synowebapi` shim only accepts JSON-encoded parameters and DSM's task-name rules. Covered:
   - refusals: not DSM, DSM 7.1, Container Manager missing or stopped, Docker down, unknown user, folders outside or at the top of a shared folder, a missing shared folder;
   - folders: a downloads folder inside the project folder, around it, equal to it, the whole `docker` shared folder, or reached through a symlink, are all refused before anything is written; so are folder names with brackets, spaces or `/./`;
   - another application's folder (its own `compose.yaml` and `.env`): install, `--apply` and `--purge` refuse it and leave its files alone;
   - `--dry-run` changes nothing and shows the requests;
-  - a fresh install without VPN keys (files, modes, root-only repository files, ownership, seeding with `python3` verified against the password, no FileBrowser file, one project, one boot task, not started);
-  - a re-run with keys and a password with spaces, quotes, a backslash and `$`: read back exactly by Compose, matching hash, nothing duplicated, all five services up, the apps inside Gluetun's network namespace, no secret on any command line or in any API request, FileBrowser's first-run password read from its log;
+  - a fresh install without VPN keys (files, modes, root-only repository files, ownership, seeding with `python3` verified against the password, the search plugin pointed at `127.0.0.1:9117`, no FileBrowser file, `configs/filebrowser` at 2775 with your user and group 100, the downloads' modes left alone, one project, one boot task, not started). `docker compose config` of the result is checked for FileBrowser: `FILEBROWSER_ADMIN_PASSWORD` equal to the qBittorrent password, the database in `/config`, `/config` being `configs/filebrowser`, `group_add` 100, and the published ports;
+  - a re-run with keys and a password with spaces, quotes, a backslash and `$`: read back exactly by Compose (for Gluetun and as FileBrowser's admin password), matching hash, nothing duplicated, all five services up, the apps inside Gluetun's network namespace, no secret on any command line or in any API request, no container log read;
+  - ports: other Jackett, FlareSolverr and FileBrowser ports are written to `.env`, published to 9117, 8191 and 80 inside the stack, shown in the printed addresses, and leave the search plugin at `127.0.0.1:9117`; two web UIs on one port, and a qBittorrent port of 9117, are refused, also by `--apply`, as is a password under 8 characters;
+  - FileBrowser's folder: `--apply` leaves the owner of FileBrowser's own database (uid 1000) alone and sets the folder back to 2775; FileBrowser's write check (uid 1000 with group 100, as the image runs) warns about downloads it cannot change, with the DSM steps, and passes once the group may write; a symlink put in place of `configs/filebrowser` or `incomplete/` does not make root change what it points to;
   - `--apply`, apps left outside Gluetun's network, every `boot.sh` path (tun via insmod or `mknod`, half-started stack, stale apps, stopped by hand, placeholders, a `compose.yaml` others could change, dry run);
   - the boot task's own script, run with `sh` as Task Scheduler would: it loads tun and runs a root-only `boot.sh`, and refuses (logging why, still loading tun) a `boot.sh` owned by another user, group- or world-writable, or put back by someone after the folder was moved away; a task pasted by hand with other spacing is recognised;
   - an older checkout of the repository (git clone without `platforms/`, owned by the user, `.env` copied from `.env.example`): its files are refreshed from a download, `.env` and the runtime config are kept, PGID 1000 becomes 100, the boot task is created;
   - downloading the repository with git (from a local git server, not GitHub) and as a `.tar.gz` with curl (no git); the project folder is never a git checkout, and `--update` works after upstream changed a tracked config seed, keeping the seeded qBittorrent config;
   - the standalone `docker-compose`, no `jq`, the seeding-container fallback (`.env` read-only, nothing installed) and both seeding paths failing, `--update` and `--update --dry-run` (shows the Container Manager update it would send), API failures, a mangled `compose.yaml`, name and folder conflicts, an existing boot task, a missing write permission, files that cannot be made root-only, `--uninstall`, and `--purge` (which also removes the boot task, and keeps the folder when the downloads are inside it, including `DOWNLOADS_PATH=./downloads`).
 - The generated project passes `docker compose config -q` with Compose v2.9.0 and v2.20.1 (versions Container Manager has shipped) and v5.6.1, with `.env` read implicitly the way Container Manager runs Compose.
-- 16 checks (all passed) with the host's real Docker:
-  - the seeding container exactly as `install.sh` runs it (`python:3.14.9-slim-trixie`, nothing installed, `.env` read-only, which is checked) seeds qBittorrent (the hash matches the password) and Jackett, and writes no FileBrowser file;
+- 42 checks (all passed) with the host's real Docker:
+  - the seeding container exactly as `install.sh` runs it (`python:3.14.9-slim-trixie`, nothing installed, `.env` read-only, which is checked) seeds qBittorrent (the hash matches the password) and Jackett, points the search plugin at `127.0.0.1:9117` although `JACKETT_PORT` is 19117, and writes no FileBrowser file;
   - the seeding CLI also runs on Python 3.8 (`python:3.8.20-slim-bookworm`), the version DSM 7 ships;
-  - the real FileBrowser image (`ghcr.io/gtsteffaniak/filebrowser:stable`, v2.0.2-stable), started as on DSM: `install.sh`'s own code finds its first-run password in the log, FileBrowser accepts it (and asks for a new one) and refuses a wrong one, it reads its settings from `/home/filebrowser/data`, and it cannot write to downloads owned by the DSM user;
+  - the real FileBrowser image (`ghcr.io/gtsteffaniak/filebrowser:stable`, v2.0.2-stable) started from the repository's own `compose.yaml` (only its network and published port taken away by an override, as this test host's Docker has no bridge networking), with an `.env` as on DSM (PUID 1026, PGID 100, the password with spaces, quotes, a backslash and `$`) and its folders prepared by `install.sh`'s own `fix_ownership`: `admin` logs in with exactly that password and is not asked to change it, a wrong one is refused, its log names `FILEBROWSER_ADMIN_PASSWORD` and no generated password, its database is `configs/filebrowser/database.sqlite` owned by uid 1000 and group 100; a user added in FileBrowser survives a restart and a recreate; a password changed in FileBrowser is replaced by `.env`'s at the next start; after `fix_ownership` again (as `--apply` runs it) and a recreate, there are no read-only database errors; a new `QBITTORRENT_PASSWORD` becomes its password and the old one stops working; it runs as uid 1000 with group 100 added, cannot write downloads that only their owner may write, and can once the group may write; `install.sh`'s FileBrowser write check, run with the real Docker, agrees both times;
   - the write check names only the folder it cannot write.
 
   (On the test host this needed `--network host` and the host's proxy CA, which is test-only.)
@@ -253,7 +268,7 @@ Not tested:
 - **No real Synology NAS or DSM.** No DSM machine or VM was available (the test host has no KVM).
 - The `SYNO.Docker.Project` and `SYNO.Core.EventScheduler` requests (create, get, update, delete) against real DSM: whether the project then appears and behaves in Container Manager exactly like one made in the UI, and whether a task made this way can be edited in Task Scheduler (Synology says only tasks created on that page can be).
 - Whether DSM's Task Scheduler runs the one-line task script with `sh` or `bash` (it is written to work with either), and real boot timing on DSM, a real `insmod` of DSM's `tun.ko`, and Container Manager's Build/Start/Stop/Clean/Delete buttons on this stack.
-- DSM's shared-folder ACLs: permissions they deny (simulated with ordinary file modes), and what `stat` shows for files whose ACLs let others write (the root-only check reads ordinary ownership and modes only).
+- DSM's shared-folder ACLs: permissions they deny (simulated with ordinary file modes), and what `stat` shows for files whose ACLs let others write (the root-only check reads ordinary ownership and modes only). In particular: that Read/Write for the `users` group on the downloads shared folder lets FileBrowser (uid 1000, which is no DSM user, with group 100) change the downloads, including the folders qBittorrent creates; that the `chmod 2775` of `configs/filebrowser` behaves on DSM as plain Unix permissions; and what FileBrowser can see in the downloads without that permission.
 - DSM's own `python3` (the tests used Debian's, and the Python 3.8 image for the version).
 - A real VPN connection (no credentials here), Gluetun on DSM's kernels, ARM models, DSM 7.3/7.4 differences.
 - The interactive questions (the tests use `--unattended`, which runs the same code without prompts), and downloading from GitHub itself (the tests download from a local git server and a local `.tar.gz`).
@@ -268,6 +283,8 @@ Synology (official):
 - Task Scheduler help (triggered tasks, task-name rules, "only tasks created on this page"): <https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/system_taskscheduler?version=7>
 - Sign in with root privilege via SSH (`sudo -i`): <https://kb.synology.com/en-global/DSM/tutorial/How_to_login_to_DSM_with_root_permission_via_SSH_Telnet>
 - Assign shared folder permissions: <https://kb.synology.com/en-global/DSM/help/DSM/AdminCenter/file_share_privilege?version=7>
+- Running `chmod` on a file or folder changes it from Windows ACL to Unix permission ("How do I revert file or folder permission from Unix permission to Windows ACL permission?"): <https://kb.synology.com/en-us/DSM/tutorial/Revert_to_Windows_ACL_permission>
+- "All users belong to the \"users\" group by default and cannot be removed from this group" (DSM 7.4 specifications, Account, identity and privileges): <https://www.synology.com/en-global/dsm/7.4/software_spec/account_identity_privileges>
 - What kind of CPU does my NAS have: <https://kb.synology.com/en-global/DSM/tutorial/What_kind_of_CPU_does_my_NAS_have>
 - Developer guide, Docker Project worker (Container Manager projects are compose folders with `compose.yaml`): <https://help.synology.com/developer-guide/resource_acquisition/docker-project.html>
 
@@ -277,7 +294,8 @@ Gluetun and Docker:
 - Gluetun wiki, VPN port forwarding: <https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/vpn-port-forwarding.md>
 - Compose file `name` element: <https://docs.docker.com/reference/compose-file/version-and-name/>
 - Docker Compose releases used in the tests: <https://github.com/docker/compose/releases/tag/v2.9.0>, <https://github.com/docker/compose/releases/tag/v2.20.1>
-- FileBrowser Quantum (the `gtsteffaniak/filebrowser` image: settings in `/home/filebrowser/data`, `FILEBROWSER_CONFIG`, first-run admin password): <https://github.com/gtsteffaniak/filebrowser>
+- FileBrowser Quantum, source of v2.0.2-stable (the image's version): `FILEBROWSER_ADMIN_PASSWORD` read in `loadEnvConfig` (<https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/config.go>); the admin user is `auth.adminUsername`, default `admin`, and its password is reset from the configured one when it is neither empty nor `admin` (<https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/auth.go>); that reset runs in `validateUserInfo` (<https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/cmd/user.go>), called at every start (<https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/cmd/root.go>); `FILEBROWSER_DATABASE_PATH` (<https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/pkg/settings/database_paths.go>); analytics off unless enabled (<https://github.com/gtsteffaniak/filebrowser/blob/v2.0.2-stable/backend/internal/state/analytics.go>). Project: <https://github.com/gtsteffaniak/filebrowser>
+- LinuxServer qBittorrent image, umask (`UMASK`, default 022): <https://github.com/linuxserver/docker-qbittorrent#umask-for-running-applications>
 
 Community (not Synology; used for the undocumented parts):
 

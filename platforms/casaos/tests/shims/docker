@@ -233,10 +233,8 @@ def main():
         print(f"docker.io/{ref}")
         return
     if cmd == "logs":
-        c = next((c for c in load("containers.json", []) if c["id"] == args[-1]), None)
-        if c and c["service"] == "filebrowser":
-            print('2026/11/08 17:20:46 [INFO ] write.go:94: Generated initial admin password for user '
-                  '"admin" (set auth.adminPassword in config to override on future resets): fb-test-pass')
+        # install.sh reads no container log (it only names the command in
+        # its messages); an empty log is all it could ever see here.
         return
     if cmd == "run":
         return cmd_run(args)

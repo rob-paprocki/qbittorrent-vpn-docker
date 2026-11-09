@@ -156,6 +156,40 @@ app_yaml() { q "st['apps']['${1:-torrent-stack}']['yaml']"; }
 compose_ok() { # yaml-file
   docker compose -p ix-test -f "$1" config -q
 }
+# same_as_compose APP: the services in the app's stored YAML are exactly
+# what `docker compose config` makes of the repository's compose.yaml with
+# the same settings (read back from that YAML), apart from the differences
+# the README lists: no watchtower, update-qbittorrent.sh mounted from the
+# dataset copy. So the installer adds no FileBrowser or port overrides of
+# its own. Compose runs with an empty environment, so nothing from this
+# shell (TZ, ...) can replace a value from the .env file.
+same_as_compose() {
+  local d="$WORK/same" hp="$PLATFORM_DIR/truenas_app.py"
+  rm -rf "$d"
+  mkdir -p "$d"
+  chmod 700 "$d"
+  (umask 077 && q "st['apps']['${1:-torrent-stack}']['config']" >"$d/current.json" &&
+    q "st['apps']['${1:-torrent-stack}']['yaml']" >"$d/app.yaml")
+  python3 "$hp" extract --repo "$REPO_DIR" --config "$d/current.json" --out "$d/layer" --meta "$d/meta" &&
+    python3 "$hp" merge --repo "$REPO_DIR" --layer "$d/layer" --out "$d/values.json" &&
+    python3 "$hp" envfile --repo "$REPO_DIR" --values "$d/values.json" --out "$d/stack.env" &&
+    env -i PATH="$PATH" HOME="$HOME" docker compose -p ix-test --project-directory "$REPO_DIR" \
+      -f "$REPO_DIR/compose.yaml" --env-file "$d/stack.env" config --format json >"$d/repo.json" &&
+    env -i PATH="$PATH" HOME="$HOME" docker compose -p ix-test -f "$d/app.yaml" config --format json >"$d/app.json" &&
+    python3 - "$d/repo.json" "$d/app.json" <<'PY'
+import json, sys
+repo = json.load(open(sys.argv[1]))["services"]
+app = json.load(open(sys.argv[2]))["services"]
+repo.pop("watchtower", None)
+for services in (repo, app):
+    vols = services["gluetun"]["volumes"]
+    services["gluetun"]["volumes"] = [v for v in vols if v.get("target") != "/gluetun/update-qbittorrent.sh"]
+diff = sorted(k for k in set(repo) | set(app) if repo.get(k) != app.get(k))
+if diff:
+    print("services that differ from compose.yaml:", diff, file=sys.stderr)
+sys.exit(1 if diff else 0)
+PY
+}
 services_started_by_default() { # yaml-file -> service list
   docker compose -p ix-test -f "$1" config --services | sort | tr '\n' ' '
 }
@@ -228,21 +262,32 @@ check "Jackett search plugin is the pinned one (sha256 from native/versions.env)
   "$(sha256sum "$C/qbittorrent/qBittorrent/nova3/engines/jackett.py" | cut -d' ' -f1)" == "$PLUGIN_SHA"
 check "search plugin URL is Jackett inside the VPN namespace (127.0.0.1:9117)" python3 -c \
   "import json,sys; sys.exit(0 if json.load(open('$C/qbittorrent/qBittorrent/nova3/engines/jackett.json'))['url']=='http://127.0.0.1:9117' else 1)"
-check "FileBrowser keeps its database in its config folder" qtrue \
+check "FileBrowser keeps its database in its config folder (compose.yaml's FILEBROWSER_DATABASE_PATH)" qtrue \
   "(lambda f: f['environment']['FILEBROWSER_DATABASE_PATH']=='/config/database.sqlite' and '$C/filebrowser:/config' in f['volumes'])(st['apps']['torrent-stack']['config']['services']['filebrowser'])"
-check "FileBrowser's admin password is the qBittorrent password" qtrue \
+check "FileBrowser's admin password is the qBittorrent password (compose.yaml's FILEBROWSER_ADMIN_PASSWORD)" qtrue \
   "st['apps']['torrent-stack']['config']['services']['filebrowser']['environment']['FILEBROWSER_ADMIN_PASSWORD']=='$QPW'"
 check "summary names the FileBrowser login" grep -q 'FileBrowser login: admin, with the qBittorrent password' "$OUT"
 check "no unused FileBrowser settings.yaml written" test ! -e "$C/filebrowser/settings.yaml"
-check "Jackett and FlareSolverr published to their fixed ports inside" qtrue \
+check "gluetun publishes 8090:8090, and Jackett/FlareSolverr to 9117/8191 inside (as compose.yaml does)" qtrue \
   "(lambda p: '9117:9117/tcp' in p and '8191:8191/tcp' in p and '8090:8090/tcp' in p)(st['apps']['torrent-stack']['config']['services']['gluetun']['ports'])"
 check "repository copy carries the installer's marker for this app" grep -qx 'app=torrent-stack' /mnt/tank/torrent-stack/source/.torrent-stack-source
 check "summary shows the app state" grep -q 'State:.*RUNNING' "$OUT"
 check "no stop marker left behind" test ! -e "$C/.torrent-stack-stopped"
 check "config folders owned by 568:568" test "$(owner "$C/qbittorrent/qBittorrent/qBittorrent.conf")" == 568:568
-check "FileBrowser's config folder owned by 1000:568" test "$(owner "$C/filebrowser")" == 1000:568
-check "downloads dataset owned by 568:568" test "$(owner /mnt/tank/torrent-stack/downloads)" == 568:568
-check "incomplete folder created, owned by 568:568" test "$(owner /mnt/tank/torrent-stack/downloads/incomplete)" == 568:568
+check "FileBrowser's config folder: 1000:568, mode 2770 (group-writable, setgid, closed to others)" \
+  test "$(owner "$C/filebrowser") $(mode "$C/filebrowser")" == "1000:568 2770"
+check "downloads dataset: 568:568, mode 2775 (group-writable, setgid)" \
+  test "$(owner /mnt/tank/torrent-stack/downloads) $(mode /mnt/tank/torrent-stack/downloads)" == "568:568 2775"
+check "incomplete folder created: 568:568, mode 2775" \
+  test "$(owner /mnt/tank/torrent-stack/downloads/incomplete) $(mode /mnt/tank/torrent-stack/downloads/incomplete)" == "568:568 2775"
+# FileBrowser's user in the container: uid 1000, gid 1000, plus PGID from
+# compose.yaml's group_add (checked with the real image in runtime-images.sh).
+as_filebrowser() { setpriv --reuid=1000 --regid=1000 --groups="$1" -- "${@:2}"; }
+check "uid 1000 with group 568 (FileBrowser) can write to the downloads, incomplete/ and its config folder" bash -c \
+  "$(declare -f as_filebrowser); as_filebrowser 568 test -w /mnt/tank/torrent-stack/downloads && as_filebrowser 568 test -w /mnt/tank/torrent-stack/downloads/incomplete && as_filebrowser 568 test -w '$C/filebrowser'"
+check "  ... but not without group 568 (the access is through the group)" bash -c \
+  "$(declare -f as_filebrowser); ! as_filebrowser 1000 test -w /mnt/tank/torrent-stack/downloads"
+check "no FileBrowser write warning for a downloads dataset the installer made" bash -c "! grep -q 'FileBrowser (user 1000' '$OUT'"
 check "seeded secrets are not world-readable" test "$(mode "$C/qbittorrent/qBittorrent/qBittorrent.conf")" == 600
 check "repository copy is root-owned" test "$(owner /mnt/tank/torrent-stack/source/compose.yaml)" == 0:0
 check "repository copy not writable by group/others" bash -c "[[ -z \$(find /mnt/tank/torrent-stack/source -perm /022 -print -quit) ]]"
@@ -267,6 +312,7 @@ check "app.update (not app.create), no datasets created" qtrue \
 app_yaml >"$WORK/B.yaml"
 check "YAML passes docker compose config" compose_ok "$WORK/B.yaml"
 check "gate lifted: all five services start" test "$(services_started_by_default "$WORK/B.yaml")" == "filebrowser flaresolverr gluetun jackett qbittorrent "
+check "the app's services are compose.yaml's as docker compose renders them (no TrueNAS overrides)" same_as_compose
 check "WireGuard key from the _FILE variable is in the YAML" qtrue \
   "st['apps']['torrent-stack']['config']['services']['gluetun']['environment']['WIREGUARD_PRIVATE_KEY']=='$WG_KEY'"
 check "the WireGuard key is not on any midclt command line" secret_not_in_argv "$WG_KEY"
@@ -283,21 +329,31 @@ check "lifting the gate is not reported as a lost hand edit" bash -c "! grep -q 
 echo "C: re-run with nothing changed (idempotent)"
 CURRENT=C
 clear_calls
+# As the installer before this change left it: FileBrowser's folder 0755.
+chmod 0755 "$C/filebrowser"
 run
 if ((RC == 0)); then ok "installer exits 0"; else bad "installer exits 0 (rc=$RC)"; show_logs; fi
 check "no app.update, app.create or dataset creation" qtrue \
   "not ({'app.update','app.create','pool.dataset.create','app.stop'} & set(methods))"
 check "says the YAML is up to date" grep -q 'already up to date' "$OUT"
+check "an older install's FileBrowser folder (0755) becomes 2770" test "$(mode "$C/filebrowser")" == 2770
 
 # ---------------------------------------------------------------------------
 echo "D: an edit made in the web UI's YAML is kept; a hand-added key is reported"
 CURRENT=D
 clear_calls
-state_set "e = st['apps']['torrent-stack']['config']['services']['gluetun']['environment']; e['SERVER_COUNTRIES'] = 'Netherlands'; e['MY_EXTRA'] = 'x'; st['apps']['torrent-stack']['config']['services']['qbittorrent']['environment']['PUID'] = 1000"
+state_set "e = st['apps']['torrent-stack']['config']['services']['gluetun']['environment']; e['SERVER_COUNTRIES'] = 'Netherlands'; e['MY_EXTRA'] = 'x'; st['apps']['torrent-stack']['config']['services']['qbittorrent']['environment']['PUID'] = 1000; st['apps']['torrent-stack']['config']['services']['filebrowser']['environment']['FILEBROWSER_ADMIN_PASSWORD'] = 'hand-edited-pw'"
 run
 if ((RC == 0)); then ok "installer exits 0"; else bad "installer exits 0 (rc=$RC)"; show_logs; fi
 check "SERVER_COUNTRIES edited in the UI is kept" qtrue \
   "st['apps']['torrent-stack']['config']['services']['gluetun']['environment']['SERVER_COUNTRIES']=='Netherlands'"
+# compose.yaml now uses ${QBITTORRENT_PASSWORD} twice (gluetun and
+# FileBrowser); the one read back is gluetun's, so a FileBrowser-only edit
+# goes back to the qBittorrent password and changes no login.
+check "FILEBROWSER_ADMIN_PASSWORD edited alone goes back to the qBittorrent password" qtrue \
+  "(lambda s: s['filebrowser']['environment']['FILEBROWSER_ADMIN_PASSWORD']=='$QPW' and s['gluetun']['environment']['QBITTORRENT_PASSWORD']=='$QPW')(st['apps']['torrent-stack']['config']['services'])"
+check "  ... reported as changed, and no re-seed (no app.stop)" bash -c \
+  "grep -q 'changed: services.filebrowser.environment.FILEBROWSER_ADMIN_PASSWORD' '$OUT' && ! grep -q '\"app.stop\"' '$TN_SHIM_STATE/calls.jsonl'"
 check "an unquoted number typed in the UI (PUID: 1000) is read back" qtrue \
   "st['apps']['torrent-stack']['config']['services']['jackett']['environment']['PUID']=='1000'"
 check "the hand-added MY_EXTRA is reported as removed" grep -q 'removed: services.gluetun.environment.MY_EXTRA' "$OUT"
@@ -452,8 +508,11 @@ if ((RC == 0)); then ok "installer exits 0"; else bad "installer exits 0 (rc=$RC
 check "every call matches the 25.10 API docs" no_schema_errors
 check "only the missing downloads dataset is not created (it exists)" qtrue \
   "[c['params'][0]['name'] for c in calls if c['method']=='pool.dataset.create'] == []"
-check "existing downloads dataset left alone (owner 3000)" test "$(owner /mnt/media/downloads)" == 3000:3000
+check "existing downloads dataset left alone (owner 3000, mode 755)" \
+  test "$(owner /mnt/media/downloads) $(mode /mnt/media/downloads)" == "3000:3000 755"
 check "warns that PUID cannot write to it" grep -q 'cannot write to /mnt/media/downloads' "$OUT"
+check "warns that FileBrowser cannot write to it either, with the fix" \
+  grep -q 'FileBrowser (user 1000, extra group 1000) cannot write to /mnt/media/downloads.*chmod g+rwxs /mnt/media/downloads' "$OUT"
 check "YAML points downloads at /mnt/media/downloads" qtrue \
   "'/mnt/media/downloads:/downloads' in st['apps']['torrent-stack']['config']['services']['qbittorrent']['volumes']"
 check "OpenVPN password not on any midclt command line" secret_not_in_argv 'openvpn-secret-pw'
@@ -646,7 +705,7 @@ check "source-check accepts a new folder in a pool" bash -c \
   "python3 '$H' source-check --source-dir /mnt/tank/new/source --allowed-root /mnt/tank | grep -qx STATE=new"
 
 # ---------------------------------------------------------------------------
-echo "N: Jackett/FlareSolverr ports: only the host side moves"
+echo "N: Jackett/FlareSolverr ports: only the host side moves (compose.yaml publishes PORT:9117 and PORT:8191)"
 CURRENT=N
 new_state
 TS_JACKETT_PORT=9118 TS_FLARESOLVERR_PORT=8192 run
@@ -685,6 +744,19 @@ chmod 600 "$OD/layer"
 python3 "$H" merge --repo "$REPO_DIR" --layer "$OD/layer" --out "$OD/values.json" --need-paths >/dev/null 2>&1 || true
 check "render refuses a host path with ':' (as read back from an edited YAML)" bash -c \
   "! python3 '$H' render --repo '$REPO_DIR' --values '$OD/values.json' --app-name x --source-dir /mnt/tank/s --allowed-root /mnt/tank --out-yaml '$OD/y' 2>'$OD/err' && grep -q \"DOWNLOADS_PATH must not contain ':'\" '$OD/err'"
+# A compose.yaml whose FileBrowser database is not in a mounted folder (the
+# image's own default): every TrueNAS update would empty it, so no YAML.
+printf '%s\0' CONFIG_PATH=/mnt/tank/c DOWNLOADS_PATH=/mnt/tank/d INCOMPLETE_DOWNLOADS=/mnt/tank/d/incomplete \
+  QBITTORRENT_USER=admin QBITTORRENT_PASSWORD=secret-123 PUID=568 PGID=568 >"$OD/layer2"
+chmod 600 "$OD/layer2"
+python3 "$H" merge --repo "$REPO_DIR" --layer "$OD/layer2" --out "$OD/values2.json" --need-paths >/dev/null 2>&1 || true
+mkdir -p "$OD/repo"
+rsync -a --exclude=.git --exclude=/configs --exclude=/downloads "$REPO_DIR/" "$OD/repo/"
+sed -i 's|FILEBROWSER_DATABASE_PATH: /config/database.sqlite|FILEBROWSER_DATABASE_PATH: /home/filebrowser/data/database.sqlite|' "$OD/repo/compose.yaml"
+check "render refuses a compose.yaml that keeps FileBrowser's database outside the configs dataset" bash -c \
+  "grep -q 'FILEBROWSER_DATABASE_PATH: /home/filebrowser' '$OD/repo/compose.yaml' && ! python3 '$H' render --repo '$OD/repo' --values '$OD/values2.json' --app-name x --source-dir /mnt/tank/s --allowed-root /mnt/tank --out-yaml '$OD/y2' 2>'$OD/err2' && grep -q 'would lose its users' '$OD/err2'"
+check "  ... and renders the repository's own compose.yaml with the same settings" \
+  python3 "$H" render --repo "$REPO_DIR" --values "$OD/values2.json" --app-name x --source-dir /mnt/tank/s --allowed-root /mnt/tank --out-yaml "$OD/y3"
 
 # ---------------------------------------------------------------------------
 echo "P: PUID/PGID with leading zeros"

@@ -47,8 +47,15 @@ readonly BACKTITLE="qbittorrent-vpn-docker for TrueNAS"
 # TrueNAS's built-in "apps" user and group. TrueNAS's own apps run as
 # 568:568 and datasets made with the Apps preset grant this user access.
 readonly APPS_UID=568
-# gtsteffaniak/filebrowser always runs as uid 1000 (see truenas_app.py).
+# gtsteffaniak/filebrowser always runs as uid 1000 (group 1000), whatever
+# PUID is (its Dockerfile: adduser -u 1000 filebrowser, USER filebrowser).
+# compose.yaml gives it PGID as an extra group (group_add), so the folders
+# it uses are made writable for PGID (see group_share).
 readonly FILEBROWSER_UID=1000
+# Inside Gluetun's network Jackett always listens on 9117 (compose.yaml
+# publishes it as JACKETT_PORT:9117), so qBittorrent's search plugin talks
+# to 127.0.0.1:9117 whatever JACKETT_PORT is.
+readonly JACKETT_INSIDE_PORT=9117
 # The file that marks a folder as this installer's copy of the repository
 # (the same name as SOURCE_MARKER in truenas_app.py). Only such a folder is
 # ever emptied and refilled.
@@ -913,6 +920,30 @@ tn_chown() { # path uid gid recursive(true|false)
     die "Could not set the owner of $1."
 }
 
+# Let the PGID group write to a folder, and make what is created in it
+# belong to that group (setgid, the "s"). FileBrowser runs as uid 1000 and
+# gets at the stack's files only through PGID (compose.yaml: group_add).
+# The symbolic mode leaves the owner's and everyone else's bits alone
+# (extra changes, such as o-rwx, can be added). This is a plain chmod, not
+# filesystem.setperm, because setperm only sets a mode after stripping the
+# ACL, and the Apps preset's ACL is what gives TrueNAS's apps user access.
+# ZFS allows chmod on those datasets (the preset sets aclmode=passthrough);
+# on one with aclmode=restricted (the SMB preset) it fails. Then the ACL
+# decides, and there is only a warning if it keeps FileBrowser out.
+group_share() { # folder [extra chmod changes]
+  local dir=$1 extra=${2:-}
+  [[ -d "$dir" && ! -L "$dir" ]] || return 0
+  chmod "g+rwxs${extra:+,$extra}" -- "$dir" 2>/dev/null && return 0
+  filebrowser_can_write "$dir" ||
+    msg_warn "Could not make $dir writable for group ${CUR[PGID]} (chmod g+rwxs), so FileBrowser cannot change files there. Give that group write access in Datasets > Permissions."
+}
+
+# Can FileBrowser's user (uid 1000, group 1000, plus PGID from group_add)
+# write to this folder?
+filebrowser_can_write() {
+  setpriv --reuid="$FILEBROWSER_UID" --regid="$FILEBROWSER_UID" --groups="${CUR[PGID]}" -- test -w "$1" 2>/dev/null
+}
+
 create_datasets() {
   local item name st q mount
   for item in "${CREATE_DS[@]}"; do
@@ -928,8 +959,10 @@ create_datasets() {
     "$CONF_DS") [[ "$mount" == "$CONF_MOUNT" ]] || die "$name is mounted at $mount, expected $CONF_MOUNT" ;;
     "$DL_DS")
       [[ "$mount" == "$DL_MOUNT" ]] || die "$name is mounted at $mount, expected $DL_MOUNT"
-      # qBittorrent writes completed downloads straight into it.
+      # qBittorrent writes completed downloads straight into it, and
+      # FileBrowser manages them through the PGID group.
       tn_chown "$DL_MOUNT" "${CUR[PUID]}" "${CUR[PGID]}" false
+      group_share "$DL_MOUNT"
       ;;
     esac
     msg_ok "Created dataset $name at $mount"
@@ -946,21 +979,35 @@ prepare_folders() {
       (umask 022 && mkdir -p -- "$src")
       owner=$(bind_owner "$src")
       tn_chown "$src" "$owner" "${CUR[PGID]}" false
+      # A new folder in the downloads (incomplete/): FileBrowser shows it
+      # too, so the PGID group may write there. Only folders made in this
+      # run are changed; FileBrowser itself can write in the downloads, so
+      # the installer (root) does not chmod what it finds there later.
+      if [[ "$src" == "$DL_MOUNT" || "$src" == "$DL_MOUNT"/* ]]; then group_share "$src"; fi
       msg_ok "Created $src (owner $owner:${CUR[PGID]})"
     fi
   done
   # The per-app config folders belong to the user each app runs as, also
   # after a PUID/PGID change (they are small, so this is quick).
+  # FileBrowser's (only FileBrowser mounts it) belongs to uid 1000, the user
+  # it runs as, with group PGID: 2770, writable for both and closed to
+  # everyone else, as its database holds the password hashes and the key
+  # that signs FileBrowser's logins. That folder is set on every run (an
+  # older installer made it 0755); no container can swap it for a link, as
+  # it is the folder mounted at /config, not something inside it.
   for b in "${BINDS[@]}"; do
     IFS=$'\t' read -r svc src _ <<<"$b"
     [[ "$src" == "$CONF_MOUNT"/* ]] || continue
     tn_chown "$src" "$(bind_owner "$src")" "${CUR[PGID]}" true
+    if [[ "$(bind_owner "$src")" == "$FILEBROWSER_UID" && "$svc" == filebrowser ]]; then group_share "$src" o-rwx; fi
   done
-  msg_ok "Config folders belong to ${CUR[PUID]}:${CUR[PGID]} (FileBrowser's to $FILEBROWSER_UID:${CUR[PGID]})"
+  msg_ok "Config folders belong to ${CUR[PUID]}:${CUR[PGID]} (FileBrowser's to $FILEBROWSER_UID:${CUR[PGID]}, mode 2770)"
   # A downloads dataset the user brought along: check, do not change.
-  if command -v setpriv >/dev/null 2>&1 &&
-    ! setpriv --reuid="${CUR[PUID]}" --regid="${CUR[PGID]}" --clear-groups -- test -w "$DL_MOUNT" 2>/dev/null; then
+  if ! setpriv --reuid="${CUR[PUID]}" --regid="${CUR[PGID]}" --clear-groups -- test -w "$DL_MOUNT" 2>/dev/null; then
     msg_warn "User ${CUR[PUID]}:${CUR[PGID]} cannot write to $DL_MOUNT. qBittorrent will fail to save downloads until you fix its permissions (Datasets > Permissions)."
+  fi
+  if ! filebrowser_can_write "$DL_MOUNT"; then
+    msg_warn "FileBrowser (user $FILEBROWSER_UID, extra group ${CUR[PGID]}) cannot write to $DL_MOUNT: it shows the downloads but cannot upload, rename or delete there. To allow it, give group ${CUR[PGID]} write access (Datasets > Permissions), or: chgrp ${CUR[PGID]} $DL_MOUNT && chmod g+rwxs $DL_MOUNT"
   fi
 }
 
@@ -1065,12 +1112,16 @@ seed_configs() {
   # CLI refuses an unpinned plugin too, so there is no fallback.
   ((rc == 0)) || die "$fail"
   # 3. The seeding CLI: qBittorrent login and search plugin settings,
-  #    Jackett API key. (FileBrowser's admin password is set through the
-  #    app's YAML instead; see truenas_app.py, render step 6.)
+  #    Jackett API key. The search plugin reaches Jackett at
+  #    127.0.0.1:9117 inside Gluetun's network (JACKETT_PORT is only the
+  #    port on the TrueNAS address). FileBrowser needs nothing here:
+  #    compose.yaml sets its "admin" password from QBITTORRENT_PASSWORD
+  #    every time it starts.
   seed_as_app_user python3 -I "$code/scripts/env-editor/seed_configs.py" --env "$SEED_DIR/seed.env" \
-    --config-root "$SEED_DIR/root" --only jackett,qbit || die "$fail"
+    --config-root "$SEED_DIR/root" --only jackett,qbit --jackett-port "$JACKETT_INSIDE_PORT" || die "$fail"
   # 4. qBittorrent 5.3 reads its login from [WebUI] once it has started
-  #    the first time; put a re-seeded login there too.
+  #    the first time. The seeding CLI writes it there as well by now; this
+  #    step also moves the leftover [Preferences] WebUI\ copies there.
   seed_as_app_user python3 -I "$code/platforms/truenas/truenas_app.py" qbit-webui-fix \
     --repo "$code" --conf "$q/qBittorrent.conf" >/dev/null || die "$fail"
   rm -rf -- "$SEED_DIR"
@@ -1167,7 +1218,7 @@ summary() {
     show "qBittorrent login" "${CUR[QBITTORRENT_USER]} / $(helper get --values "$WORK/values.json" QBITTORRENT_PASSWORD)"
     echo "    Write it down. It is also in the app's YAML (Apps > $APP_NAME > Edit, QBITTORRENT_PASSWORD)."
   fi
-  echo "    FileBrowser login: admin, with the qBittorrent password."
+  echo "    FileBrowser login: admin, with the qBittorrent password (FileBrowser sets it again on every start)."
   case "$state" in
   RUNNING | DEPLOYING) ;;
   *)
@@ -1375,7 +1426,8 @@ main() {
     *) echo "    - create $SOURCE_DIR and copy the repository into it" ;;
     esac
     echo "      (root-owned and read-only for everyone else; update-qbittorrent.sh runs as root in Gluetun)"
-    echo "    - create missing folders and set owners (PUID ${CUR[PUID]}, PGID ${CUR[PGID]})"
+    echo "    - create missing folders and set owners (PUID ${CUR[PUID]}, PGID ${CUR[PGID]}); new download"
+    echo "      folders and FileBrowser's config folder become writable for group ${CUR[PGID]} (setgid)"
     ((seed)) && echo "    - write the first-run configs in $CONF_MOUNT"
     ((NO_PULL)) || echo "    - pull ${IMAGES[*]}"
     # Sent through TrueNAS's Python API client, not midclt (see truenas_app.py).
