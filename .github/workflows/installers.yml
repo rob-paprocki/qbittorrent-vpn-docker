@@ -1,0 +1,213 @@
+name: installers
+
+# Checks for the installers in native/ and platforms/ that run on a plain
+# GitHub-hosted Ubuntu runner, without TrueNAS, CasaOS, Proxmox, Incus or a
+# VPN. Nothing is installed system-wide: the only download is PyYAML, into
+# a venv in $RUNNER_TEMP (a scratch folder the runner deletes after the
+# job), and the scripts only write there, in the checkout and in temporary
+# folders they delete again. Only one command uses sudo: CasaOS's
+# install.sh refuses to run as anyone but root, even for --print-yaml (see
+# that step).
+#
+# Not run here: the full test suites (platforms/*/tests/run-tests.sh) and
+# the end-to-end tests. They need root, private mount namespaces, Incus or
+# a real platform; each platform's README says how to run them.
+#
+# To run a step on your own machine: it is plain bash. Run it from the
+# checkout, with RUNNER_TEMP set to an empty scratch folder and
+# GITHUB_WORKSPACE to the checkout.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Read the code, nothing else.
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # bash --noprofile --norc -eo pipefail: stop at the first failing
+    # command, including one in the middle of a pipe.
+    shell: bash
+
+jobs:
+  scripts:
+    name: script syntax and file modes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: bash -n on every .sh file
+        run: |
+          # bash -n reads a script without running it and reports syntax
+          # errors (a missing "fi", an unclosed quote, ...).
+          n=0 failed=0
+          while IFS= read -r -d '' f; do
+            n=$((n + 1))
+            if ! bash -n "$f"; then
+              echo "::error file=$f::bash -n found a syntax error"
+              failed=$((failed + 1))
+            fi
+          done < <(git ls-files -z -- '*.sh')
+          echo "Checked $n .sh files, $failed with errors."
+          [[ "$n" -gt 0 ]] || { echo "::error::git ls-files found no .sh files"; exit 1; }
+          [[ "$failed" -eq 0 ]]
+
+      - name: python3 -m py_compile on every .py file
+        run: |
+          # Compiles each file without running it: catches syntax errors.
+          # The compiled files go to $RUNNER_TEMP, not into the checkout.
+          export PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache"
+          python3 --version
+          mapfile -d '' files < <(git ls-files -z -- '*.py')
+          [[ "${#files[@]}" -gt 0 ]] || { echo "::error::git ls-files found no .py files"; exit 1; }
+          python3 -m py_compile "${files[@]}"
+          echo "Compiled ${#files[@]} .py files."
+
+      - name: every .sh file is executable in git (mode 100755)
+        run: |
+          # The one-liners and the installers run these files directly, so
+          # git must store them as executable. Fix one with:
+          #   git update-index --chmod=+x path/to/script.sh
+          # git ls-files -s prints "<mode> <object> <stage><TAB><path>".
+          n=0 failed=0
+          while IFS= read -r -d '' entry; do
+            n=$((n + 1))
+            mode=${entry%% *}
+            path=${entry#*$'\t'}
+            if [[ "$mode" != 100755 ]]; then
+              echo "::error file=$path::stored in git as mode $mode, not 100755 (run: git update-index --chmod=+x '$path')"
+              failed=$((failed + 1))
+            fi
+          done < <(git ls-files -s -z -- '*.sh')
+          echo "Checked $n .sh files, $failed not executable."
+          [[ "$n" -gt 0 ]] || { echo "::error::git ls-files found no .sh files"; exit 1; }
+          [[ "$failed" -eq 0 ]]
+
+  platform-render:
+    name: TrueNAS and CasaOS app YAML from .env.example
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Python with PyYAML (pinned, in a venv)
+        run: |
+          # The TrueNAS helper and the CasaOS schema check need PyYAML.
+          # It goes into a throwaway venv in $RUNNER_TEMP, pinned to one
+          # version and to the sha256 of its Linux x86-64 wheels for
+          # Python 3.12 (ubuntu-latest today), 3.13 and 3.14, as listed on
+          # https://pypi.org/project/PyYAML/6.0.3/#files, so pip refuses
+          # any other file. --only-binary: never build from source.
+          python3 -m venv "$RUNNER_TEMP/venv"
+          cat >"$RUNNER_TEMP/ci-requirements.txt" <<'EOF'
+          PyYAML==6.0.3 \
+              --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc \
+              --hash=sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6 \
+              --hash=sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5
+          EOF
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --disable-pip-version-check \
+            --only-binary=:all: --require-hashes -r "$RUNNER_TEMP/ci-requirements.txt"
+          "$RUNNER_TEMP/venv/bin/python" -c 'import yaml; print("PyYAML", yaml.__version__)'
+
+      - name: "TrueNAS: render the custom app YAML and check it with docker compose config"
+        run: |
+          # install.sh --print-yaml cannot run here: before it renders
+          # anything it needs root, TrueNAS's midclt and Python API client,
+          # and answers from the TrueNAS middleware (version, Apps pool,
+          # datasets). So this calls the two helper commands install.sh's
+          # render_yaml uses, truenas_app.py merge and render, with the
+          # settings a fresh install starts from: .env.example, the TrueNAS
+          # defaults install.sh adds (apps user 568, qBittorrent user admin,
+          # no Discord URL) and dataset paths on a pool named "tank".
+          # The VPN settings stay placeholders, so the helper gates Gluetun
+          # and the apps behind it with the vpn-not-configured profile.
+          py="$RUNNER_TEMP/venv/bin/python"
+          out="$RUNNER_TEMP/truenas"
+          # The helper refuses settings files that other users can read
+          # (on a real install they hold the VPN key and passwords).
+          umask 077
+          mkdir -p "$out"
+          ds=/mnt/tank/torrent-stack
+          # Settings layers: NUL-separated KEY=VALUE records, as install.sh
+          # writes them.
+          printf '%s=%s\0' PUID 568 PGID 568 TZ Etc/UTC QBITTORRENT_USER admin \
+            SCRIPT_NOTIFY_URL '' >"$out/defaults.nul"
+          printf '%s=%s\0' CONFIG_PATH "$ds/configs" DOWNLOADS_PATH "$ds/downloads" \
+            INCOMPLETE_DOWNLOADS "$ds/downloads/incomplete" >"$out/paths.nul"
+          # --generate-qbit-password: a random qBittorrent password, as on
+          # a real fresh install. It is thrown away with $RUNNER_TEMP.
+          "$py" platforms/truenas/truenas_app.py merge --repo . \
+            --layer "$out/defaults.nul" --layer "$out/paths.nul" \
+            --out "$out/values.json" --generate-qbit-password --need-paths
+          "$py" platforms/truenas/truenas_app.py render --repo . --values "$out/values.json" \
+            --app-name torrent-stack --source-dir "$ds/source" --allowed-root /mnt/tank \
+            --out-yaml "$out/app.yaml"
+          # TrueNAS validates the YAML with `docker compose -f FILE config`
+          # before it creates the app. Check it without and with the
+          # gating profile, so all services are checked.
+          docker compose version
+          docker compose -f "$out/app.yaml" config -q
+          docker compose -f "$out/app.yaml" --profile vpn-not-configured config -q
+          services=$(docker compose -f "$out/app.yaml" --profile vpn-not-configured config --services | paste -sd ' ' -)
+          echo "TrueNAS app YAML is valid. Services: $services"
+
+      - name: "CasaOS: install.sh --print-yaml and check it with docker compose config"
+        run: |
+          # --print-yaml works offline: it reads .env and compose.yaml and
+          # prints the CasaOS app YAML; it never talks to CasaOS. The .env
+          # is .env.example with what install.sh itself writes into it:
+          # absolute paths (CasaOS cannot use ./configs) and a qBittorrent
+          # login that is not the placeholder (install.sh refuses one). The
+          # password below is a dummy for this check only.
+          py="$RUNNER_TEMP/venv/bin/python"
+          appdata="$RUNNER_TEMP/casaos/AppData"
+          stack="$appdata/torrent-stack"
+          mkdir -p "$stack"
+          cp .env.example "$stack/.env"
+          set_env() { # KEY VALUE: replace the KEY= line in the test .env
+            sed -i -E "s|^$1=.*|$1=$2|" "$stack/.env"
+            grep -qxF "$1=$2" "$stack/.env" || { echo "::error::could not set $1 in the test .env"; exit 1; }
+          }
+          set_env CONFIG_PATH "$stack/configs"
+          set_env DOWNLOADS_PATH /DATA/Downloads
+          set_env INCOMPLETE_DOWNLOADS /DATA/Downloads/incomplete
+          set_env QBITTORRENT_USER admin
+          set_env QBITTORRENT_PASSWORD ci-dummy-password
+          # install.sh stops unless it runs as root (on a real host the
+          # .env holding the VPN key is readable by root only). sudo is
+          # passwordless on GitHub's runners. In this mode the script only
+          # reads files and uses a temporary folder it deletes again.
+          # TS_IPV6_SYSCTL=on: keep Gluetun's IPv6 sysctl, as on a kernel
+          # with IPv6 (otherwise it depends on the runner's kernel).
+          # The > redirect is done by the runner user, not root, on purpose:
+          # the YAML file belongs to the runner user.
+          # shellcheck disable=SC2024
+          sudo env TS_APPDATA="$appdata" TS_SOURCE_DIR="$GITHUB_WORKSPACE" TS_IPV6_SYSCTL=on \
+            bash platforms/casaos/install.sh --print-yaml >"$RUNNER_TEMP/casaos/casaos-app.yml"
+          docker compose -f "$RUNNER_TEMP/casaos/casaos-app.yml" config -q
+          echo "CasaOS app YAML passes docker compose config."
+          # The CasaOS test suite's check of the same file: what CasaOS and
+          # its AppStore accept (x-casaos fields, no '$', absolute paths).
+          "$py" -I platforms/casaos/tests/lib/casaos_schema.py "$RUNNER_TEMP/casaos/casaos-app.yml"
+          echo "CasaOS/AppStore schema checks passed."
+
+  native-env-parsing:
+    name: .env parsing and seeding CLI (native/tests/check-env-parsing.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: native/tests/check-env-parsing.sh
+        run: |
+          # No root, no containers: `docker compose config` (no daemon
+          # needed) is the reference for how .env is read. The script skips
+          # that part when docker compose is missing, so make sure it ran.
+          docker compose version
+          bash native/tests/check-env-parsing.sh | tee "$RUNNER_TEMP/env-parsing.log"
+          if grep -q '^  skip' "$RUNNER_TEMP/env-parsing.log"; then
+            echo "::error::check-env-parsing.sh skipped a check"
+            exit 1
+          fi
