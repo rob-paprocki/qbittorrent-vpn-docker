@@ -209,7 +209,7 @@ The file holds your secrets. Delete it after pasting.
 1. Create the datasets.
 2. Create the folders the YAML mounts. Make `configs/filebrowser` owned by `1000:PGID` with mode 2770 (`chown 1000:PGID` and `chmod 2770`): FileBrowser runs as uid 1000 and keeps its database there, and in a folder it cannot write to it keeps restarting with "unable to open database file".
 3. Copy `update-qbittorrent.sh` to the `source` path the YAML names. Make it root-owned, mode 755.
-4. Do the first-run steps from [Doing it manually](../../README.md#doing-it-manually-without-the-editor) in the main README.
+4. Do the first-run steps from [Doing it manually](../docker/README.md#doing-it-manually-without-the-editor) in the Docker guide.
 
 Letting the installer create the app does all of this for you.
 

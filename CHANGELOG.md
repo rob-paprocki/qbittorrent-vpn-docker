@@ -26,6 +26,7 @@ A new major version means an existing install may need manual steps when you upd
 - This changelog (`CHANGELOG.md`), with a version back-filled for every merged PR (see the note at the top).
 - For contributors: `CLAUDE.md`, the rules every change follows for versioning, the changelog, the README and user-facing text.
 - For contributors: the humanizer and structural-humanizer skills under `.claude/skills/`, vendored from [NulightJens/humanizer-stack](https://github.com/NulightJens/humanizer-stack) at commit `13f5c02` under its MIT licence, for editing user-facing text.
+- `ROADMAP.md`: planned work, each item linked to its issue, plus known problems not yet filed ([#24](https://github.com/rob-paprocki/qbittorrent-vpn-docker/pull/24)).
 
 ### Changed
 
@@ -38,6 +39,8 @@ A new major version means an existing install may need manual steps when you upd
 - `update-qbittorrent.sh` no longer posts to Discord when `SCRIPT_NOTIFY_URL` is empty or still the `.env.example` placeholder ([#17](https://github.com/rob-paprocki/qbittorrent-vpn-docker/pull/17)).
 - README: a platform installers table, the ports inside and outside the stack, a FileBrowser section, help for hosts booted with `ipv6.disable=1`, and upgrade notes for this version ([#17](https://github.com/rob-paprocki/qbittorrent-vpn-docker/pull/17)).
 - CI: checks the installers and the native code on every PR ([#17](https://github.com/rob-paprocki/qbittorrent-vpn-docker/pull/17)).
+- The README is rewritten as an overview of the project: what the stack does and who it's for, how it fits together, every platform's one-line installer, a quick start, how to check that the VPN is used, every `.env` key with its default, and answers to common problems. Its new diagram and badges follow your light or dark theme. The diagram is a committed image rather than Mermaid, which the GitHub mobile app shows as raw code ([#24](https://github.com/rob-paprocki/qbittorrent-vpn-docker/pull/24)).
+- The instructions for plain Docker Compose moved from the README to [platforms/docker/README.md](platforms/docker/README.md): setup, Dockhand and Dockge, doing it by hand, ports, FileBrowser, and hosts booted with `ipv6.disable=1`. That guide also says how to update, uninstall and replace a lost env-editor login. The README's upgrade notes for earlier versions are gone; their steps are in this changelog's **BREAKING** entries, and the rest is under Updating in the new guide. The README's Setup and docker-pve sections stay, so links to them still work ([#24](https://github.com/rob-paprocki/qbittorrent-vpn-docker/pull/24)).
 
 ### Fixed
 

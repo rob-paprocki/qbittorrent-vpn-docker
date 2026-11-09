@@ -11,6 +11,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # CLAUDE.md, "Images and diagrams": no Mermaid (the GitHub mobile app
+      # shows it as raw code), and every image a doc shows from the repo must
+      # follow the reader's theme: an SVG with its own prefers-color-scheme
+      # dark palette, or a NAME-light/NAME-dark pair the doc shows both of.
+      - name: Check Markdown diagrams and images
+        run: |
+          bad=0
+          if git ls-files -z '*.md' | xargs -0 -r grep -nE '^[[:space:]]*(```|~~~)[[:space:]]*mermaid'; then
+            echo "::error::Mermaid block found. Commit a rendered image instead (CLAUDE.md, Images and diagrams)."; bad=1
+          fi
+          for f in $(git ls-files '*.md'); do
+            for img in $(awk '/^[[:space:]]*(```|~~~)/{c=!c; next} !c' "$f" | grep -oE '!\[[^]]*\]\([^) ]+|<(img|source)[^>]*(src|srcset)="[^"]+' | sed -E 's/.*[("]//; s/[?#].*//' | grep -vE '^(https?:|data:)' || true); do
+              p="$(dirname "$f")/$img"
+              case "$img" in
+                *.svg) grep -qE 'prefers-color-scheme: ?dark' "$p" 2>/dev/null && continue ;;
+                *-light.*) [ -f "$p" ] && grep -qF "${img/-light./-dark.}" "$f" && continue ;;
+                *-dark.*) [ -f "$p" ] && grep -qF "${img/-dark./-light.}" "$f" && continue ;;
+              esac
+              echo "::error file=$f::$img does not follow the reader's light or dark theme (CLAUDE.md, Images and diagrams)."; bad=1
+            done
+          done
+          exit "$bad"
       - name: Run shellcheck
         uses: ludeeus/action-shellcheck@2.0.0
         with:
