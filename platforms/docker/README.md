@@ -97,7 +97,7 @@ docker compose up -d
 
 ## Updating
 
-Images and the repository update separately. For the images, see **Image updates** under [Operational notes](#operational-notes). To update the repository (`compose.yaml`, the scripts and the env-editor):
+Images and the repository update separately. For the images, see **Image updates** under [Operational notes](#operational-notes). To update them by hand, with neither Dockhand nor Watchtower running, run `docker compose pull` and then `docker compose up -d` in the stack folder. To update the repository (`compose.yaml`, the scripts and the env-editor):
 
 1. Stop the env-editor (Ctrl+C) and run `git pull` in the stack folder. If it stops, see the notes below.
 2. Read the new entries in [CHANGELOG.md](../../CHANGELOG.md). An entry marked **BREAKING:** says what to change before you go on. For example, an install from before 2.0.0 must take the old Compose project down under its old name first, and one from before 3.0.0 must decide whether to keep its Watchtower: its container keeps running after the update, because `docker compose up` (even with `--remove-orphans`) leaves a profile-disabled service's container alone.
