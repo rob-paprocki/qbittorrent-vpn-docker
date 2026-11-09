@@ -5,6 +5,13 @@ Entry point: `python3 app.py` (via scripts/setup.sh, which handles venv).
 Default bind is 0.0.0.0:9191 with HTTP Basic Auth. Admin password is
 auto-generated on first run, written to configs/env-editor/credentials.json
 and printed to stdout once.
+
+Two modes, chosen by the TS_MODE environment variable:
+  docker (default)  Apply runs `docker compose up -d <services>`.
+  native            Apply runs `native/install.sh apply <services>`, which
+                    re-renders the configs and restarts the systemd units
+                    torrent-<service>. Set by the torrent-env-editor unit
+                    that native/install.sh writes inside a Debian container.
 """
 from __future__ import annotations
 
@@ -15,6 +22,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -39,6 +47,15 @@ CREDS_PATH = REPO / "configs" / "env-editor" / "credentials.json"
 
 BIND = os.environ.get("ENV_EDITOR_BIND", "0.0.0.0:9191")
 AUTH_USER = os.environ.get("ENV_EDITOR_USER", "admin")
+
+# Native (systemd) mode: see the module docstring.
+NATIVE = os.environ.get("TS_MODE", "docker").strip().lower() == "native"
+NATIVE_INSTALLER = REPO / "native" / "install.sh"
+
+# Native mode reads .env values literally (undoing write_env's quoting), so
+# a password holding " or \\ survives being shown in the form and saved
+# again. Docker mode keeps the original parser unchanged.
+_parse_env = env_io.parse_env_literal if NATIVE else env_io.parse_env
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -107,8 +124,8 @@ def require_auth(fn):
 @app.route("/")
 @require_auth
 def form_page():
-    current = env_io.parse_env(ENV_PATH)
-    example = env_io.parse_env(ENV_EXAMPLE)
+    current = _parse_env(ENV_PATH)
+    example = _parse_env(ENV_EXAMPLE)
     sections: dict[str, list[dict]] = {}
     for f in env_io.FIELDS:
         value = current.get(f["name"], example.get(f["name"], ""))
@@ -127,10 +144,22 @@ def form_page():
 @require_auth
 def preview():
     submitted = _collect_form(request.form)
-    current = env_io.parse_env(ENV_PATH)
+    current = _parse_env(ENV_PATH)
     changed = {k: (current.get(k, ""), v) for k, v in submitted.items()
                if current.get(k, "") != v}
     services, seeders, remove = restart_map.resolve(set(changed.keys()), submitted)
+    all_services = restart_map.all_services(submitted)
+    if NATIVE:
+        services, seeders, remove, all_services = _native_plan(
+            services, seeders, all_services, set(changed))
+        problem = _native_check(submitted)
+        if problem:
+            return render_template("native_invalid.html", problem=problem)
+        if not changed:
+            # Offer to apply .env again, for example after an Apply that
+            # failed half-way (the values were already saved then).
+            session["pending"] = submitted
+            return render_template("native_unchanged.html")
     session["pending"] = submitted
     return render_template(
         "confirm.html",
@@ -138,7 +167,8 @@ def preview():
         services=services,
         seeders=seeders,
         remove=remove,
-        full_restart=sorted(services) == sorted(restart_map.all_services(submitted)),
+        full_restart=sorted(services) == sorted(all_services),
+        native=NATIVE,
     )
 
 
@@ -150,13 +180,24 @@ def apply():
         flash("Session expired — resubmit the form.", "error")
         return redirect(url_for("form_page"))
 
-    current = env_io.parse_env(ENV_PATH)
+    current = _parse_env(ENV_PATH)
     changed_keys = {k for k, v in submitted.items() if current.get(k, "") != v}
     services, seeders, remove = restart_map.resolve(changed_keys, submitted)
+
+    if NATIVE:
+        # Refuse values the native install cannot use before saving them.
+        problem = _native_check(submitted)
+        if problem:
+            return render_template("native_invalid.html", problem=problem)
 
     env_io.write_env(ENV_PATH, ENV_EXAMPLE, submitted)
 
     log: list[str] = [f"Wrote {ENV_PATH}"]
+    if NATIVE:
+        services = _apply_native(changed_keys, services, seeders, log)
+        return render_template("applied.html", log=log, services=services,
+                               native=True)
+
     config_root = Path(submitted.get("CONFIG_PATH") or "./configs")
     if not config_root.is_absolute():
         config_root = (REPO / config_root).resolve()
@@ -171,9 +212,11 @@ def apply():
             submitted["QBITTORRENT_USER"],
             submitted["QBITTORRENT_PASSWORD"],
         )
+        # In Docker mode Jackett always listens on 9117 inside the shared
+        # Gluetun network; JACKETT_PORT is only the host-side port that
+        # compose.yaml publishes. qBittorrent reaches Jackett from inside.
         seed_configs.seed_qbit_jackett_wiring(
-            config_root, api_key, "127.0.0.1",
-            int(submitted.get("JACKETT_PORT", "9117")),
+            config_root, api_key, "127.0.0.1", 9117,
         )
         log.append("Seeded qBittorrent.conf (PBKDF2 + search plugin)")
 
@@ -270,6 +313,100 @@ def indexer_delete(indexer_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Native (systemd) mode
+# ---------------------------------------------------------------------------
+
+# Extra restarts that only exist natively, where every service shares one
+# network namespace and listens on its .env port: Gluetun's firewall lets
+# the FileBrowser port in, and Jackett stores FlareSolverr's URL.
+NATIVE_EXTRA_RESTARTS: dict[str, list[str]] = {
+    "FILEBROWSER_PORT": ["gluetun"],
+    "FLARESOLVERR_PORT": ["jackett"],
+}
+
+
+def _native_plan(services: list[str], seeders: list[str],
+                 all_services: list[str], changed_keys: set[str]):
+    """Adjust a Docker restart plan for native mode.
+
+    Profiled services (Watchtower) do not exist natively: updates are
+    `native/install.sh update`. The FileBrowser seeder is dropped because
+    native/install.sh apply renders FileBrowser's config, admin login
+    included, from .env every time.
+    """
+    profiled = set(restart_map.PROFILED)
+    extra = {svc for key in changed_keys for svc in NATIVE_EXTRA_RESTARTS.get(key, [])}
+    services = sorted((set(services) | extra) - profiled)
+    all_services = [s for s in all_services if s not in profiled]
+    seeders = [s for s in seeders if s != "filebrowser"]
+    return services, seeders, [], all_services
+
+
+def _apply_native(changed_keys: set[str], services: list[str],
+                  seeders: list[str], log: list[str]) -> list[str]:
+    """Hand the restart (and the qBittorrent seeding) to native/install.sh.
+
+    The installer stops the units first, then seeds and re-renders, then
+    starts them, so qBittorrent cannot overwrite the freshly seeded
+    password with its old in-memory settings while shutting down.
+    Returns the services that were restarted.
+    """
+    services, seeders, _remove, _all = _native_plan(services, seeders, [], changed_keys)
+    cmd = ["bash", str(NATIVE_INSTALLER), "apply"]
+    # Same rule as Docker mode: seed qBittorrent when its credentials
+    # changed, or when Apply was pressed with nothing changed.
+    if "qbit" in seeders or not changed_keys:
+        cmd.append("--seed=qbit")
+    if not changed_keys:
+        # "Apply again": re-render everything and restart the whole stack
+        # (`apply` with no service names), e.g. after a failed Apply.
+        services = [s for s in restart_map.all_services({}) if s not in restart_map.PROFILED]
+    elif services:
+        cmd += services
+    else:
+        # `apply` with no service names restarts everything; ask for none.
+        cmd.append("--no-restart")
+    log.append(" ".join(cmd[1:]))
+    try:
+        # native/install.sh waits at most 5 minutes for another run (an
+        # `update`, say) to finish, so this timeout is longer than that.
+        proc = subprocess.run(cmd, cwd=str(REPO), capture_output=True,
+                              text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        log.append("[timeout] native/install.sh apply took over 10 minutes; "
+                   "check `journalctl -u 'torrent-*'`, then use Apply again")
+        return services
+    output = (proc.stdout + proc.stderr).strip()
+    if output:
+        log.append(output)
+    if proc.returncode != 0:
+        log.append(f"[exit {proc.returncode}]")
+    return services
+
+
+def _native_check(submitted: dict[str, str]) -> str | None:
+    """Ask native/lib/render.py whether the submitted values are usable.
+
+    Returns its error message, or None when they are fine. The values are
+    written to a private temporary file (never to .env) for the check.
+    """
+    fd, tmp = tempfile.mkstemp(prefix=".env.check.", dir=str(CREDS_PATH.parent))
+    os.close(fd)  # mkstemp made it 0600; write_env keeps that mode
+    try:
+        env_io.write_env(Path(tmp), ENV_EXAMPLE, submitted)
+        proc = subprocess.run(
+            [sys.executable, "-I", str(REPO / "native" / "lib" / "render.py"),
+             "--root", str(REPO), "info", "--env", tmp],
+            capture_output=True, text=True, timeout=60)
+    finally:
+        os.unlink(tmp)
+    if proc.returncode == 0:
+        return None
+    text = (proc.stderr or proc.stdout).strip()
+    return text.removeprefix("render: .env problem: ") or f"check failed (exit {proc.returncode})"
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -285,7 +422,7 @@ def _collect_form(form) -> dict[str, str]:
 
 
 def _jackett_client() -> JackettClient | None:
-    env = env_io.parse_env(ENV_PATH)
+    env = _parse_env(ENV_PATH)
     port = env.get("JACKETT_PORT", "9117")
     config_root = Path(env.get("CONFIG_PATH") or "./configs")
     if not config_root.is_absolute():

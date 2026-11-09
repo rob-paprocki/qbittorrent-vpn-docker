@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+#
+# platforms/unraid/tests/shims/docker
+#
+# Purpose: test stand-in for the docker CLI on an Unraid server, used by
+# platforms/unraid/tests/run-tests.sh. Every call is appended to
+# $SHIM_LOG. Read-only and validation calls go to the real docker
+# (compose config / version); calls that would start or stop containers
+# are only recorded. `docker run` (the installer's seeding container) runs
+# for real, with two test-only additions explained below.
+#
+# Copyright (c) 2025-2026 Rob Paprocki
+# License: MIT (see LICENSE in the repository root)
+
+set -euo pipefail
+
+REAL_DOCKER="${SHIM_REAL_DOCKER:-/usr/bin/docker}"
+{
+  printf 'docker'
+  printf ' %q' "$@"
+  printf '\n'
+} >>"${SHIM_LOG:?}"
+
+# Integration mode (tests/integration-real-docker.sh): everything but the
+# seeding container's test-only additions goes to the real docker.
+if [[ "${SHIM_REAL_DOCKER_ALL:-0}" == 1 && "${1:-}" != run ]]; then
+  exec "$REAL_DOCKER" "$@"
+fi
+
+case "${1:-}" in
+  info)
+    # A running Docker service, unless the test says otherwise.
+    [[ "${SHIM_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+    exit 0
+    ;;
+  rm)
+    # The installer removes a leftover seeding container before a new run.
+    exit 0
+    ;;
+  ps)
+    # Containers the test pretends exist.
+    args="$*"
+    if [[ "$args" == *service=qbittorrent* ]]; then
+      [[ "${SHIM_QBIT_RUNNING:-0}" == 1 ]] && echo "0123456789ab"
+    elif [[ "$args" == *config_files* && -n "${SHIM_PS_CONFIG_FILES:-}" ]]; then
+      printf '%s\n' "$SHIM_PS_CONFIG_FILES"
+    fi
+    exit 0
+    ;;
+  run)
+    # The seeding container. The docker daemon runs outside the test's
+    # private mount namespace, so it cannot see the fake /mnt: bind sources
+    # under /mnt/ are rewritten to the folder that backs it ($SHIM_FAKE_ROOT).
+    # The test machine may reach the internet only through an HTTPS proxy
+    # and/or a TLS-inspecting egress with its own CA: the container joins the
+    # host network, gets HTTPS_PROXY if set, and trusts $SHIM_EXTRA_CA if
+    # set. None of this applies on a real Unraid server.
+    shift
+    out=()
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == -v && "${2:-}" == /mnt/* && -n "${SHIM_FAKE_ROOT:-}" ]]; then
+        out+=(-v "${SHIM_FAKE_ROOT}${2}")
+        shift 2
+        continue
+      fi
+      out+=("$1")
+      shift
+    done
+    extra=(--network host)
+    if [[ -n "${HTTPS_PROXY:-}" ]]; then
+      extra+=(-e "HTTPS_PROXY=${HTTPS_PROXY}" -e "https_proxy=${HTTPS_PROXY}")
+    fi
+    if [[ -n "${SHIM_EXTRA_CA:-}" && -f "${SHIM_EXTRA_CA}" ]]; then
+      extra+=(-v "${SHIM_EXTRA_CA}:/etc/ssl/test-extra-ca.crt:ro"
+        -e SSL_CERT_FILE=/etc/ssl/test-extra-ca.crt -e PIP_CERT=/etc/ssl/test-extra-ca.crt)
+    elif [[ -n "${SHIM_EXTRA_CA:-}" ]]; then
+      # Say so: the seeding then fails with a TLS error and many checks
+      # fail after it, with no other hint.
+      echo "shim: SHIM_EXTRA_CA=${SHIM_EXTRA_CA} not found inside the test namespace" \
+        "(run-tests.sh replaces /usr/local with the fake Unraid tree; put the CA file elsewhere)" >&2
+    fi
+    if [[ "${SHIM_SEED_FAIL:-0}" == 1 ]]; then
+      echo "shim: seeding container failed on purpose" >&2
+      exit 1
+    fi
+    exec "$REAL_DOCKER" run "${extra[@]}" "${out[@]}"
+    ;;
+  compose)
+    # Stock Unraid has no compose plugin (Compose Manager Plus brings it).
+    if [[ "${SHIM_NO_COMPOSE:-0}" == 1 ]]; then
+      echo "docker: 'compose' is not a docker command." >&2
+      exit 1
+    fi
+    # Find the compose subcommand after the global options.
+    sub=""
+    skip=0
+    for a in "${@:2}"; do
+      if [[ "$skip" == 1 ]]; then
+        skip=0
+        continue
+      fi
+      case "$a" in
+        -f | -p | --env-file | --profile | --project-directory | --file | --project-name) skip=1 ;;
+        -*) ;;
+        *)
+          sub="$a"
+          break
+          ;;
+      esac
+    done
+    case "$sub" in
+      config | version) exec "$REAL_DOCKER" "$@" ;;
+      images | ps | ls) exit 0 ;;
+      up | down | stop | pull | rm | start | restart)
+        [[ "${SHIM_COMPOSE_FAIL:-0}" == 1 ]] && {
+          echo "shim: compose ${sub} failed on purpose" >&2
+          exit 1
+        }
+        echo "shim: docker compose ${sub} recorded"
+        exit 0
+        ;;
+      *)
+        echo "shim: unexpected docker compose call: $*" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    echo "shim: unexpected docker call: $*" >&2
+    exit 2
+    ;;
+esac

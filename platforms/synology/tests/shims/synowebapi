@@ -1,0 +1,228 @@
+#!/usr/bin/python3
+"""Test shim for DSM's /usr/syno/bin/synowebapi, used by
+platforms/synology/tests/run-tests.sh.
+
+Purpose: answer the two DSM web APIs platforms/synology/install.sh calls,
+with the request and reply shapes published for them (see
+platforms/synology/README.md, References):
+
+  SYNO.Docker.Project (Container Manager)   list, get, create, update, delete
+  SYNO.Core.EventScheduler (Task Scheduler)  get, create, delete
+
+Like synowebapi, `api`, `method` and `version` may be bare words; every other
+parameter must be a JSON value (strings "quoted"), otherwise DSM answers
+error 120 (invalid parameter), and so does this shim. create writes the
+project's compose.yaml into the project folder, as Container Manager does.
+
+State: $FAKE_SYNO_DIR/state.json. Every call is appended to
+$FAKE_SYNO_DIR/calls.jsonl with its decoded parameters. Flags (files in
+$FAKE_SYNO_DIR): fail-project-create, fail-task-create, fail-task-delete,
+mangle-content
+(write the content still JSON-encoded, as a server that did not decode it
+would).
+
+Copyright (c) 2025-2026 Rob Paprocki
+License: MIT (see LICENSE in the repository root)
+"""
+import datetime
+import glob
+import json
+import os
+import re
+import sys
+import uuid
+
+DIR = os.environ.get("FAKE_SYNO_DIR", "/var/lib/fake-syno")
+STATE = os.path.join(DIR, "state.json")
+
+
+def flag(name):
+    return os.path.exists(os.path.join(DIR, name))
+
+
+def load():
+    try:
+        with open(STATE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return {"projects": {}, "tasks": {}}
+
+
+def save(st):
+    os.makedirs(DIR, exist_ok=True)
+    with open(STATE, "w", encoding="utf-8") as fh:
+        json.dump(st, fh, indent=1)
+
+
+def reply(obj, rc=0):
+    print(json.dumps(obj, indent=3))
+    return rc
+
+
+def error(code):
+    return reply({"error": {"code": code}, "success": False})
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def share_to_path(share_path):
+    """'/docker/torrent-stack' -> '/volume1/docker/torrent-stack' (the volume
+    that holds the shared folder)."""
+    share = share_path.strip("/").split("/")[0]
+    for vol in sorted(glob.glob("/volume[0-9]*")):
+        if os.path.isdir(os.path.join(vol, share)):
+            return vol + share_path
+    return None
+
+
+def project_api(method, p, st):
+    projects = st["projects"]
+    if method == "list":
+        public = {k: {f: v for f, v in pr.items() if not f.startswith("_")} for k, pr in projects.items()}
+        return reply({"data": public, "httpd_restart": False, "success": True})
+    if method == "get":
+        pr = projects.get(p.get("id"))
+        if not isinstance(p.get("id"), str) or pr is None:
+            return error(2001)
+        data = {k: v for k, v in pr.items() if not k.startswith("_")}
+        # Container Manager's own copy of the compose file (set by create
+        # and update), so an outdated project is noticed and updated.
+        data["content"] = pr.get("_content", "")
+        return reply({"data": data, "httpd_restart": False, "success": True})
+    if method == "create":
+        name, share_path, content = p.get("name"), p.get("share_path"), p.get("content")
+        if not all(isinstance(v, str) for v in (name, share_path, content)):
+            return error(120)
+        if not isinstance(p.get("enable_service_portal", False), bool):
+            return error(120)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+            return error(120)
+        if flag("fail-project-create"):
+            return error(2002)
+        if any(x["name"] == name for x in projects.values()):
+            return error(2003)
+        path = share_to_path(share_path)
+        if path is None or not os.path.isdir(path):
+            return error(2004)
+        write_content(path, content)
+        pid = str(uuid.uuid4())
+        projects[pid] = {
+            "containerIds": [], "created_at": now(), "enable_service_portal": False,
+            "id": pid, "is_package": False, "name": name, "path": path,
+            "service_portal_name": "", "service_portal_port": 0, "service_portal_protocol": "",
+            "services": [], "share_path": share_path, "state": "", "status": "STOPPED",
+            "updated_at": now(), "version": 2, "_content": content,
+        }
+        save(st)
+        return reply({"data": {"id": pid}, "httpd_restart": False, "success": True})
+    if method == "update":
+        pr = projects.get(p.get("id"))
+        if pr is None or not isinstance(p.get("content"), str):
+            return error(120)
+        write_content(pr["path"], p["content"])
+        pr["_content"] = p["content"]
+        pr["updated_at"] = now()
+        save(st)
+        return reply({"httpd_restart": False, "success": True})
+    if method == "delete":
+        pr = projects.get(p.get("id"))
+        if pr is None or not isinstance(p.get("preserve_content", False), bool):
+            return error(120)
+        if not p.get("preserve_content", False):
+            try:
+                os.remove(os.path.join(pr["path"], "compose.yaml"))
+            except OSError:
+                pass
+        del projects[pr["id"]]
+        save(st)
+        return reply({"httpd_restart": False, "success": True})
+    return error(103)
+
+
+def write_content(path, content):
+    if flag("mangle-content"):
+        content = json.dumps(content)
+    with open(os.path.join(path, "compose.yaml"), "w", encoding="utf-8") as fh:
+        fh.write(content)
+
+
+def task_api(method, p, st):
+    tasks = st["tasks"]
+    name = p.get("task_name")
+    if not isinstance(name, str):
+        return error(120)
+    if method == "get":
+        t = tasks.get(name)
+        if t is None:
+            return error(4800)
+        return reply({"data": t, "success": True})
+    if method == "create":
+        # DSM's Task Scheduler help: task names hold only English letters,
+        # digits and spaces, do not start or end with a space, and have at
+        # most 130 characters.
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9 ]{0,128}[A-Za-z0-9])?", name):
+            return error(120)
+        want = {"owner": dict, "event": str, "enable": bool, "operation_type": str, "operation": str,
+                "depend_on_task": str, "notify_enable": bool, "notify_mail": str, "notify_if_error": bool}
+        for key, typ in want.items():
+            if not isinstance(p.get(key), typ):
+                return error(120)
+        if p["event"] != "bootup" or p["operation_type"] != "script" or p["owner"] != {"0": "root"}:
+            return error(120)
+        if flag("fail-task-create"):
+            return error(4801)
+        if name in tasks:
+            return error(4802)
+        tasks[name] = {"task_name": name, "owner": p["owner"], "event": p["event"],
+                       "enable": p["enable"], "operation_type": p["operation_type"],
+                       "operation": p["operation"]}
+        save(st)
+        return reply({"data": {"task_name": name}, "success": True})
+    if method == "delete":
+        if flag("fail-task-delete"):
+            return error(4803)
+        if name not in tasks:
+            return error(4800)
+        del tasks[name]
+        save(st)
+        return reply({"success": True})
+    return error(103)
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] != ["--exec"]:
+        sys.stderr.write("usage: synowebapi --exec api=... method=... version=... [key=value...]\n")
+        return 1
+    params = {}
+    for a in args[1:]:
+        key, sep, raw = a.partition("=")
+        if not sep:
+            return error(101)
+        if key in ("api", "method", "version"):
+            params[key] = raw.strip('"')
+            continue
+        try:
+            params[key] = json.loads(raw)
+        except ValueError:
+            os.makedirs(DIR, exist_ok=True)
+            with open(os.path.join(DIR, "calls.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"invalid_json_param": key, "raw": raw[:200]}) + "\n")
+            return error(120)
+    os.makedirs(DIR, exist_ok=True)
+    with open(os.path.join(DIR, "calls.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(params) + "\n")
+    if params.get("version") != "1":
+        return error(104)
+    st = load()
+    if params.get("api") == "SYNO.Docker.Project":
+        return project_api(params.get("method"), params, st)
+    if params.get("api") == "SYNO.Core.EventScheduler":
+        return task_api(params.get("method"), params, st)
+    return error(102)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

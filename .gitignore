@@ -39,3 +39,7 @@
 *~
 .DS_Store
 Thumbs.db
+
+# Python bytecode anywhere in the tree (native/lib, platform test helpers).
+__pycache__/
+*.pyc

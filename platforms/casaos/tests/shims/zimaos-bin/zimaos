@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# platforms/casaos/tests/shims/zimaos-bin/zimaos - stand-in for ZimaOS's main
+# binary. `zimaos -v` prints the version plus the git commit and build date.
+# License: MIT (see LICENSE in the repository root).
+[[ "${1:-}" == -v ]] || { echo "zimaos shim: only -v is supported" >&2; exit 2; }
+echo "v${ZIMAOS_SHIM_VERSION:-1.8.0}"
+echo "git commit: 0123456789abcdef"
+echo "build date: 2026-10-15T11:10:16Z"

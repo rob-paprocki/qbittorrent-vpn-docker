@@ -1,0 +1,19 @@
+#!/bin/bash
+# Test shim for DSM's /usr/syno/bin/synopkg (platforms/synology/tests).
+# `synopkg status PKG` exits with $FAKE_SYNO_DIR/cm-status (default 0:
+# started; DSM 7.2 uses 17 stopped, 255 not installed, 150 broken), and
+# `synopkg version PKG` prints $FAKE_SYNO_DIR/cm-version.
+# Copyright (c) 2025-2026 Rob Paprocki. License: MIT (see LICENSE).
+set -u
+dir="${FAKE_SYNO_DIR:-/var/lib/fake-syno}"
+echo "synopkg $*" >>"$dir/synopkg.calls"
+case "${1:-} ${2:-}" in
+  "status ContainerManager")
+    code=$(cat "$dir/cm-status" 2>/dev/null || echo 0)
+    exit "$code"
+    ;;
+  "version ContainerManager")
+    cat "$dir/cm-version" 2>/dev/null || echo "24.0.2-1707"
+    ;;
+  *) exit 255 ;;
+esac
