@@ -26,6 +26,7 @@ A new major version means an existing install may need manual steps when you upd
 - This changelog (`CHANGELOG.md`), with a version back-filled for every merged PR (see the note at the top).
 - For contributors: `CLAUDE.md`, the rules every change follows for versioning, the changelog, the README and user-facing text.
 - For contributors: the humanizer and structural-humanizer skills under `.claude/skills/`, vendored from [NulightJens/humanizer-stack](https://github.com/NulightJens/humanizer-stack) at commit `13f5c02` under its MIT licence, for editing user-facing text.
+- `ROADMAP.md`: planned work, each item linked to its issue, plus known problems not yet filed ([#PR](https://github.com/rob-paprocki/qbittorrent-vpn-docker/pull/PR)).
 
 ### Changed
 

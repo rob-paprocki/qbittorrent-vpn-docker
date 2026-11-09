@@ -308,7 +308,7 @@ One person maintains this as a hobby, so a reply can take a few days.
 
 ## Contributing
 
-Pull requests are welcome. [CLAUDE.md](CLAUDE.md) has the rules every change follows: Semantic Versioning, a line under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) in the same PR, updated READMEs when behaviour changes, and how diagrams are made. The [PR template](.github/pull_request_template.md) asks for a summary, a test plan and a rollback line.
+Pull requests are welcome. Planned work is in [ROADMAP.md](ROADMAP.md), with an issue for each item. [CLAUDE.md](CLAUDE.md) has the rules every change follows: Semantic Versioning, a line under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) in the same PR, updated READMEs when behaviour changes, and how diagrams are made. The [PR template](.github/pull_request_template.md) asks for a summary, a test plan and a rollback line.
 
 The `lint` and `installers` workflows run on every PR; `lint` also fails on a Mermaid block or on an image that doesn't follow the reader's theme. Each installer's guide says how to run its test suite, [platforms/DESIGN.md](platforms/DESIGN.md) explains how the installers are built, and [UPSTREAMS.md](UPSTREAMS.md) lists every pinned version and how to bump it.
 
