@@ -198,7 +198,9 @@ Environment variables (all optional; they also pre-fill the questions):
   TS_FILEBROWSER_PORT        Ports on the NAS (8090, 9117, 8191, 8081)
   Secrets are read from files, never from the command line:
   TS_WIREGUARD_PRIVATE_KEY_FILE, TS_OPENVPN_PASSWORD_FILE,
-  TS_QBITTORRENT_PASSWORD_FILE  (first line of the file; chmod 600 it)
+  TS_QBITTORRENT_PASSWORD_FILE  (first line of the file; chmod 600 it). The
+                                qBittorrent password is also FileBrowser's admin
+                                password: 8 characters to 72 bytes, not 'admin'.
   TS_SCRIPT_NOTIFY_URL_FILE     Discord webhook for port-forward messages
                                 (same format; default: none)
   TS_SOURCE_DIR=/path        Copy this local checkout instead of downloading.
@@ -1144,6 +1146,9 @@ wizard() {
 
   echo
   echo "  ${BOLD}qBittorrent login${CL} (FileBrowser's user 'admin' gets the same password)."
+  echo "  The password needs at least 8 characters and at most 72 bytes, and cannot be"
+  echo "  'admin' (FileBrowser's limits; a character outside ASCII, such as an accented"
+  echo "  letter, takes 2 to 4 bytes)."
   qbit_user=$(current QBITTORRENT_USER "admin")
   is_unset QBITTORRENT_USER "$qbit_user" && qbit_user="admin"
   ask qbit_user "qBittorrent username" "$qbit_user"
@@ -1162,7 +1167,7 @@ wizard() {
   else
     ask_secret qbit_pw "qBittorrent password (empty = keep current)"
   fi
-  [[ ${#qbit_pw} -ge 8 ]] || die "The qBittorrent password must be at least 8 characters."
+  check_qbit_password "$qbit_pw" "The qBittorrent password"
   set_setting QBITTORRENT_USER "$qbit_user"
   set_setting QBITTORRENT_PASSWORD "$qbit_pw"
   # Discord webhook for the port-forward script: from
@@ -1196,6 +1201,41 @@ wizard() {
   if [[ ! -f "$ENV_FILE" ]]; then
     set_setting COMPOSE_PROFILES ""
   fi
+}
+
+# check_qbit_password PASSWORD WHAT [OPTION]: refuse a qBittorrent password
+# FileBrowser cannot use. compose.yaml makes it FileBrowser's admin password
+# too (FILEBROWSER_ADMIN_PASSWORD), and FileBrowser Quantum (v2.0.2-stable)
+# sets it again on every start, except when it is "admin": then a new
+# database gets a random password and an existing one keeps its old one.
+# When it sets the password it refuses fewer than 5 bytes, and its bcrypt
+# hash cannot take more than 72 bytes. This installer's own minimum of 8
+# characters covers the 5 bytes. WHAT names the password in the message;
+# OPTION is the option to run again once it is fixed.
+check_qbit_password() {
+  local pw=$1 what=$2 again="" bytes
+  [[ -z "${3:-}" ]] || again=" Fix it, then run ${3} again."
+  [[ "$pw" != admin ]] ||
+    die "${what} cannot be 'admin': it is also FileBrowser's admin password, and FileBrowser ignores 'admin' (it would make up a password of its own, or keep its old one).${again}"
+  [[ ${#pw} -ge 8 ]] || die "${what} must be at least 8 characters (it is also FileBrowser's admin password).${again}"
+  # Bytes, not characters: wc -c counts bytes in any locale. printf is a
+  # bash builtin, so the password is not on any command line.
+  bytes=$(printf '%s' "$pw" | wc -c)
+  [[ "$bytes" -le 72 ]] ||
+    die "${what} is ${bytes} bytes long; at most 72 work, because it is also FileBrowser's admin password and FileBrowser (bcrypt) cannot store a longer one. A character outside ASCII, such as an accented letter, takes 2 to 4 bytes.${again}"
+}
+
+# check_env_login OPTION: before --apply or --update (OPTION) starts the
+# stack with .env, its qBittorrent login must be set (not .env.example's
+# placeholders) and the password one FileBrowser can use.
+check_env_login() {
+  local qbit_user qbit_pw
+  qbit_user=$(env_get "$ENV_FILE" QBITTORRENT_USER)
+  qbit_pw=$(env_get "$ENV_FILE" QBITTORRENT_PASSWORD)
+  if is_unset QBITTORRENT_USER "$qbit_user" || is_unset QBITTORRENT_PASSWORD "$qbit_pw"; then
+    die "QBITTORRENT_USER/QBITTORRENT_PASSWORD in ${ENV_FILE} are still placeholders. Set them, then run $1 again."
+  fi
+  check_qbit_password "$qbit_pw" "QBITTORRENT_PASSWORD in ${ENV_FILE}" "$1"
 }
 
 # check_ports QBIT JACKETT FLARESOLVERR FILEBROWSER: refuse ports this
@@ -2083,15 +2123,8 @@ do_apply() {
   if ! vpn_ready_from_env; then
     die "The VPN keys in ${ENV_FILE} are still the .env.example placeholders. Fill them in, then run --apply again."
   fi
-  local qbit_user qbit_pw
-  qbit_user=$(env_get "$ENV_FILE" QBITTORRENT_USER)
-  qbit_pw=$(env_get "$ENV_FILE" QBITTORRENT_PASSWORD)
-  if is_unset QBITTORRENT_USER "$qbit_user" || is_unset QBITTORRENT_PASSWORD "$qbit_pw"; then
-    die "QBITTORRENT_USER/QBITTORRENT_PASSWORD in ${ENV_FILE} are still placeholders."
-  fi
-  # As in the wizard. It also keeps FileBrowser's admin password real:
-  # FileBrowser ignores an empty one or "admin" and keeps its old password.
-  [[ ${#qbit_pw} -ge 8 ]] || die "QBITTORRENT_PASSWORD in ${ENV_FILE} must be at least 8 characters (it is also FileBrowser's admin password)."
+  # The same password rules as the wizard's.
+  check_env_login --apply
   check_ports "$(env_get "$ENV_FILE" QBIT_WEBUI_PORT)" "$(env_get "$ENV_FILE" JACKETT_PORT)" \
     "$(env_get "$ENV_FILE" FLARESOLVERR_PORT)" "$(env_get "$ENV_FILE" FILEBROWSER_PORT)"
   # Before anything runs a repository file as root (the seeding CLI next).
@@ -2116,6 +2149,9 @@ do_apply() {
 do_update() {
   load_installed
   check_conflicts
+  # The update recreates the containers with .env as it is, so its
+  # qBittorrent login is checked as --apply does, before anything changes.
+  check_env_login --update
   prepare_source update
   install_source
   secure_repo_files

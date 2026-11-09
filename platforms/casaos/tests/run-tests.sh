@@ -21,8 +21,10 @@
 # tests put a stub search plugin in place first, so it downloads nothing.
 # CASAOS_TEST_PYTHON=/path/to/python3 picks the python3 that install.sh
 # finds "on the box" (default: the python3 on PATH). Optional: busybox (or
-# CASAOS_TEST_BUSYBOX=/path/to/busybox) to run one update with busybox's tar,
-# as ZimaOS may have. Run as root (install.sh requires it), from anywhere:
+# CASAOS_TEST_BUSYBOX=/path/to/busybox) to run two updates with busybox's
+# tar, cp, mkdir and rm, as on a host whose tools are busybox's; and
+# setpriv (util-linux) for the checks run as another user. Run as root
+# (install.sh requires it, except for --print-yaml), from anywhere:
 #   bash platforms/casaos/tests/run-tests.sh
 #
 # License: MIT (see LICENSE in the repository root).
@@ -86,6 +88,8 @@ OVPN_PASS="Ovpn-Test-Pass-9"
   # Passwords FileBrowser cannot use as its admin password.
   printf '%s\n' admin >"$WORK/qb-admin.pass"
   printf '%s\n' abcd >"$WORK/qb-short.pass"
+  # 2 letters but 4 bytes: FileBrowser counts bytes.
+  printf '%s\n' 'éé' >"$WORK/qb-accents.pass"
   printf '%s\n' "$(printf 'x%.0s' $(seq 1 73))" >"$WORK/qb-long.pass"
 )
 
@@ -281,7 +285,7 @@ check "a whole disk (/media/<disk>) as downloads folder: refused" test "$RC" != 
 run_inst qbport TS_QBIT_WEBUI_PORT=9117 TS_JACKETT_PORT=9118 TS_WIREGUARD_PRIVATE_KEY_FILE="$WORK/wg.key" \
   TS_WIREGUARD_ADDRESSES=10.2.0.2/32 TS_QBITTORRENT_PASSWORD_FILE="$WORK/qb.pass" -- -y --dry-run
 check "QBIT_WEBUI_PORT on a port used inside Gluetun's network: refused" test "$RC" != 0 -a -n "$(grep "taken inside Gluetun's network" "$LOG")"
-for pw in admin:"ignores the password 'admin'" short:"needs at least 5 characters" long:"takes at most 72 bytes"; do
+for pw in admin:"ignores the password 'admin'" short:"needs at least 5 bytes" accents:"needs at least 5 bytes" long:"takes at most 72 bytes"; do
   run_inst "fbpass-${pw%%:*}" TS_WIREGUARD_PRIVATE_KEY_FILE="$WORK/wg.key" TS_WIREGUARD_ADDRESSES=10.2.0.2/32 \
     TS_QBITTORRENT_PASSWORD_FILE="$WORK/qb-${pw%%:*}.pass" -- -y --dry-run
   check "a qBittorrent password FileBrowser cannot use (${pw%%:*}): refused" test "$RC" != 0 -a -n "$(grep -F "${pw#*:}" "$LOG")"
@@ -548,7 +552,7 @@ cp "$STACK/.env" "$WORK/env.good"
 sed -i "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD=abcd/" "$STACK/.env"
 mark_requests
 run_inst apply-shortpass -- --apply
-check "a 4-character QBITTORRENT_PASSWORD in .env: refused (FileBrowser's admin password)" test "$RC" != 0 -a -n "$(grep "is also FileBrowser's admin password, and FileBrowser needs at least 5 characters" "$LOG")"
+check "a 4-character QBITTORRENT_PASSWORD in .env: refused (FileBrowser's admin password)" test "$RC" != 0 -a -n "$(grep "is also FileBrowser's admin password, and FileBrowser needs at least 5 bytes" "$LOG")"
 check "nothing sent to CasaOS after that refusal" test -z "$(requests_since | grep -E '^(PUT|POST)')"
 cp "$WORK/env.good" "$STACK/.env"
 sed -i "s/^QBITTORRENT_PASSWORD=.*/QBITTORRENT_PASSWORD='pa\$\$word'/" "$STACK/.env"
@@ -588,6 +592,56 @@ fi
 check "Watchtower rendering passes the schema checks" python3 -I "$HERE/lib/casaos_schema.py" "$OUT/print-wt.yml"
 sed -i 's/^COMPOSE_PROFILES=.*/COMPOSE_PROFILES=/' "$STACK/.env"
 
+section "--print-yaml without root; everything else needs root"
+if command -v setpriv >/dev/null 2>&1; then
+  # As uid 65534 (nobody), as in CI: --print-yaml only reads .env,
+  # compose.yaml and update-qbittorrent.sh, and writes only stdout and its
+  # own temporary folder.
+  as_nobody() { setpriv --reuid=65534 --regid=65534 --clear-groups -- env HOME=/nonexistent TMPDIR=/tmp "$@"; }
+  NR="$WORK/DATA-nr/AppData"
+  mkdir -p "$NR/torrent-stack"
+  cp "$STACK/.env" "$NR/torrent-stack/.env"
+  chown -R 65534:65534 "$WORK/DATA-nr"
+  TS_IPV6_SYSCTL=on PATH="$SHIM_PATH" TS_APPDATA="$NR" TS_SOURCE_DIR="$SRC" bash "$INSTALL" --print-yaml >"$OUT/print-root.yml" 2>/dev/null
+  set +e
+  as_nobody TS_IPV6_SYSCTL=on PATH="$SHIM_PATH" TS_APPDATA="$NR" TS_SOURCE_DIR="$SRC" bash "$INSTALL" --print-yaml \
+    >"$OUT/print-nobody.yml" 2>"$OUT/print-nobody.err"
+  rc=$?
+  set -e
+  check "--print-yaml as a user other than root, with a .env it may read: exit 0" test "$rc" == 0
+  check "...prints the same YAML as for root" cmp "$OUT/print-root.yml" "$OUT/print-nobody.yml"
+  check "...which passes the schema checks" python3 -I "$HERE/lib/casaos_schema.py" "$OUT/print-nobody.yml"
+  check "...and writes nothing into the stack folder" test "$(cd "$NR" && find . | sort | tr '\n' ' ')" == ". ./torrent-stack ./torrent-stack/.env "
+  set +e
+  as_nobody PATH="$SHIM_PATH" TS_APPDATA="$APPDATA" TS_SOURCE_DIR="$SRC" bash "$INSTALL" --print-yaml \
+    >"$OUT/print-noread.yml" 2>"$OUT/print-noread.err"
+  rc=$?
+  set -e
+  check "--print-yaml when .env is root's (0600): exit 1, says to run it as root, prints nothing" \
+    test "$rc" == 1 -a ! -s "$OUT/print-noread.yml" -a -n "$(grep 'as nobody. It holds the VPN key, so on an installed stack only root may read it: run this as root' "$OUT/print-noread.err")"
+  # Every other action stops at the root check, before it talks to CasaOS
+  # or changes a file.
+  listing() { find "$STACK" "$DOWNLOADS" -printf '%p %s %T@ %m %u:%g\n' | sort; }
+  before=$(listing)
+  mark_requests
+  refused=""
+  for args in "-y" "--apply" "--update -y" "--uninstall -y" "--uninstall --purge -y" "-y --dry-run" "-y --no-register"; do
+    set +e
+    # shellcheck disable=SC2086  # $args is several words on purpose
+    as_nobody PATH="$SHIM_PATH" CASAOS_SHIM_STATE="$STATE" TS_CASAOS_API="$API" TS_CASAOS_APPS_DIR="$APPS_DIR" \
+      TS_APPDATA="$APPDATA" TS_SOURCE_DIR="$SRC" TS_WAIT=2 TS_POLL_INTERVAL=0 TS_UI=plain \
+      bash "$INSTALL" $args </dev/null >"$OUT/nobody.log" 2>&1
+    rc=$?
+    set -e
+    if [[ "$rc" != 1 ]] || ! grep -q 'Run this as root' "$OUT/nobody.log"; then refused+=" [$args: exit $rc]"; fi
+  done
+  check "as a user other than root, install, --apply, --update, --uninstall (--purge), --dry-run and --no-register are refused (exit 1, 'Run this as root')" test -z "$refused"
+  check "...before anything is sent to CasaOS" test -z "$(requests_since)"
+  check "...or changed in the stack and downloads folders" test "$before" == "$(listing)"
+else
+  skip "--print-yaml without root" "setpriv (util-linux) is not installed"
+fi
+
 section "--update (new image)"
 set_config '{"new_images": ["lscr.io/linuxserver/jackett:latest"]}'
 before=$(container_ids)
@@ -601,7 +655,50 @@ check "a new image means CasaOS replaced the containers (and the wait saw it)" t
 check "repository files refreshed (source recorded)" grep -q "^source=$SRC" "$STACK/.casaos-state"
 check "--update applies with the freshly copied installer" has "$LOG" "Applying with the updated installer"
 
-section "--update from a tarball (no git$( [[ -n "${CASAOS_TEST_BUSYBOX:-}" || -n "$(command -v busybox || true)" ]] && echo ', busybox tar'))"
+# path_without DIR NAME...: fill DIR with links to every command in the
+# usual bin folders except NAME..., for a PATH without those commands.
+path_without() {
+  local dir=$1 d f n
+  shift
+  mkdir -p "$dir"
+  for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
+    [[ -d "$d" ]] || continue
+    for f in "$d"/*; do
+      n=${f##*/}
+      [[ -e "$dir/$n" || ! -x "$f" || " $* " == *" $n "* ]] && continue
+      ln -s "$f" "$dir/$n"
+    done
+  done
+}
+path_without "$WORK/nogit" git
+path_without "$WORK/notar" tar
+path_without "$WORK/nogit-notar" git tar
+# busybox (CASAOS_TEST_BUSYBOX, or the one on PATH): its tar (every call
+# logged), cp, mkdir and rm, as on a host whose tools are busybox's.
+BB="${CASAOS_TEST_BUSYBOX:-$(command -v busybox || true)}"
+BB_NAME="" BB_TOOLS="" BB_COPY=""
+mkdir -p "$WORK/bbtools"
+if [[ -n "$BB" ]]; then
+  # (Whole outputs, not a pipe into head or grep -q: busybox would get
+  # SIGPIPE, and pipefail would stop the suite.)
+  bb_help=$("$BB" 2>&1 || true)
+  bb_help=${bb_help%%$'\n'*}
+  bb_help=${bb_help#BusyBox }
+  BB_NAME="busybox ${bb_help%% *}"
+  BB_TOOLS="; ${BB_NAME} tar, cp, mkdir and rm"
+  BB_COPY="; ${BB_NAME} cp, mkdir and rm"
+  bb_help=$("$BB" tar --help 2>&1 || true)
+  if [[ "$bb_help" == *--exclude* ]]; then
+    BB_TOOLS+=" (its tar has --exclude)"
+  else
+    BB_TOOLS+=" (its tar has no --exclude)"
+  fi
+  printf '#!/bin/sh\necho "$*" >>%q\nexec %q tar "$@"\n' "$STATE/bbtar.log" "$BB" >"$WORK/bbtools/tar"
+  chmod +x "$WORK/bbtools/tar"
+  for n in cp mkdir rm; do ln -s "$BB" "$WORK/bbtools/$n"; done
+fi
+
+section "--update from a tarball (no git${BB_TOOLS})"
 # A GitHub-like archive of the working tree, at a tag, whose install.sh
 # renders a different app version (to see that the NEW script applied it).
 GH="$WORK/gh/rob-paprocki/qbittorrent-vpn-docker"
@@ -609,23 +706,7 @@ mkdir -p "$GH/archive" "$WORK/tarsrc"
 cp -a "$SRC" "$WORK/tarsrc/qbittorrent-vpn-docker-v9.9.9"
 sed -i 's/^readonly RENDER_VERSION="[^"]*"/readonly RENDER_VERSION="9.9.9"/' "$WORK/tarsrc/qbittorrent-vpn-docker-v9.9.9/platforms/casaos/install.sh"
 tar -C "$WORK/tarsrc" -czf "$GH/archive/v9.9.9.tar.gz" qbittorrent-vpn-docker-v9.9.9
-# A PATH without git (ZimaOS has none): every command but git.
-mkdir -p "$WORK/nogit"
-for d in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
-  [[ -d "$d" ]] || continue
-  for f in "$d"/*; do
-    n=${f##*/}
-    [[ "$n" == git || -e "$WORK/nogit/$n" || ! -x "$f" ]] && continue
-    ln -s "$f" "$WORK/nogit/$n"
-  done
-done
-BB="${CASAOS_TEST_BUSYBOX:-$(command -v busybox || true)}"
-mkdir -p "$WORK/bbtar"
-if [[ -n "$BB" ]]; then
-  printf '#!/bin/sh\necho "$*" >>%q\nexec %q tar "$@"\n' "$STATE/bbtar.log" "$BB" >"$WORK/bbtar/tar"
-  chmod +x "$WORK/bbtar/tar"
-fi
-NOGIT_PATH="$HERE/shims:$HERE/shims/casaos-bin:$WORK/bbtar:$WORK/nogit"
+NOGIT_PATH="$HERE/shims:$HERE/shims/casaos-bin:$WORK/bbtools:$WORK/nogit"
 run_inst update-tar PATH="$NOGIT_PATH" TS_SOURCE_DIR= TS_REPO_URL="file://$GH" TS_REF=v9.9.9 -- --update -y
 check "--update without git downloads the tarball and exits 0" test "$RC" == 0 -a -n "$(grep "Downloading file://$GH/archive/v9.9.9.tar.gz (git is not installed)" "$LOG")"
 check "the new installer did the apply (app version 9.9.9)" grep -q "^  version: '9.9.9'$" "$STATE/apps/torrent-stack.yml"
@@ -633,13 +714,107 @@ check "fork and tag remembered for the next --update" bash -c "grep -qx 'ref=v9.
 run_inst update-tar-again PATH="$NOGIT_PATH" TS_SOURCE_DIR= -- --update -y
 check "a plain --update -y (as from cron) keeps that tag and fork" test "$RC" == 0 -a -n "$(grep "Downloading file://$GH/archive/v9.9.9.tar.gz" "$LOG")"
 if [[ -n "$BB" ]]; then
-  check "busybox tar unpacked the tarball and copied the files" bash -c "grep -q -- '-x -z -o -f' '$STATE/bbtar.log' && grep -q -- '-x -o -f -' '$STATE/bbtar.log' && grep -q 'Repository files are in' '$LOG'"
+  # Its tar only unpacked the download; copying the files needs no tar.
+  check "${BB_NAME}: its tar unpacked the tarball, its cp copied the files" bash -c "grep -q -- '^-x -z -o -f ' '$STATE/bbtar.log' && ! grep -v -- '^-x -z -o -f ' '$STATE/bbtar.log' && grep -q 'Repository files are in' '$LOG'"
 else
-  skip "busybox tar" "no busybox here (set CASAOS_TEST_BUSYBOX)"
+  skip "busybox tar and cp" "no busybox here (set CASAOS_TEST_BUSYBOX)"
 fi
+mark_requests
+run_inst nogit-notar PATH="$HERE/shims:$HERE/shims/casaos-bin:$WORK/nogit-notar" TS_SOURCE_DIR= -- --update -y
+check "neither git nor tar: refused with advice (TS_SOURCE_DIR)" test "$RC" == 1 -a -n "$(grep 'Neither git nor tar is installed' "$LOG")"
+check "...before anything was sent to CasaOS" test -z "$(requests_since | grep -E '^(PUT|POST|DELETE)')"
 # Back to the working tree's own files for the tests below.
 run_inst update-back -- --update -y
 check "back on the working tree's files" test "$RC" == 0
+
+section "Copying the repository files (no tar${BB_COPY})"
+# A source with everything the copy must leave out (each marked DECOY or
+# Decoy), names that need care, a symlink and a FIFO, owned by another user
+# as a checkout given as TS_SOURCE_DIR may be. In the stack folder,
+# symlinks where the copy puts a file and a folder; they must be replaced,
+# never written through. Run with umask 077, as the README's cron line does.
+CRAFT="$WORK/craft"
+cp -a "$SRC" "$CRAFT"
+mkdir -p "$CRAFT/.git" "$CRAFT/downloads" "$CRAFT/incomplete" "$CRAFT/scripts/env-editor/.venv/bin" \
+  "$CRAFT/scripts/env-editor/__pycache__" "$CRAFT/new folder"
+for f in .git/DECOY configs/DECOY downloads/DECOY incomplete/DECOY scripts/env-editor/.venv/bin/DECOY \
+  scripts/env-editor/__pycache__/DECOY.cpython-314.pyc scripts/env-editor/DECOY.pyc; do
+  echo decoy >"$CRAFT/$f"
+done
+printf 'QBITTORRENT_PASSWORD=Decoy-Pass-0\n' >"$CRAFT/.env"
+printf 'QBITTORRENT_PASSWORD=Decoy-Pass-0\n' >"$CRAFT/.env.local"
+echo 'source=Decoy' >"$CRAFT/.casaos-state"
+echo 'name: Decoy' >"$CRAFT/casaos-app.yml"
+echo dash >"$CRAFT/new folder/-dash file"
+echo shared >"$CRAFT/new folder/group-writable"
+chmod 664 "$CRAFT/new folder/group-writable"
+echo private >"$CRAFT/new folder/private"
+chmod 600 "$CRAFT/new folder/private"
+chmod 775 "$CRAFT/new folder"
+ln -s README.md "$CRAFT/readme-link"
+mkfifo "$CRAFT/fifo"
+chown -R 1000:1000 "$CRAFT"
+echo canary >"$WORK/canary"
+mkdir -p "$WORK/canary-dir"
+# plant_links: the stack folder as described above, before each copy (and
+# ENV_SUM: its .env as it was then).
+plant_links() {
+  rm -rf "$STACK/README.md" "$STACK/native" "$STACK/new folder" "$STACK/readme-link"
+  ln -s "$WORK/canary" "$STACK/README.md"
+  ln -s "$WORK/canary-dir" "$STACK/native"
+  ENV_SUM=$(sha256sum <"$STACK/.env")
+}
+# copy_checks WHAT: the stack folder after an --update from $CRAFT.
+copy_checks() {
+  local what=$1
+  check "$what: --update copied the files and exits 0" test "$RC" == 0 -a -n "$(grep 'Repository files are in' "$LOG")"
+  check "$what: the source's .git, .env, .env.local, configs/, downloads/, incomplete/, .venv, __pycache__, *.pyc, .casaos-state, casaos-app.yml are left out" \
+    bash -c "test -z \"\$(find '$STACK' -name 'DECOY*' -print)\" && test ! -e '$STACK/.env.local' &&
+      ! grep -rqs -e Decoy '$STACK/.env' '$STACK/.casaos-state' '$STACK/casaos-app.yml'"
+  check "$what: the stack's own .env is kept as it was" test "$ENV_SUM" == "$(sha256sum <"$STACK/.env")"
+  check "$what: a name starting with '-', a folder with a space, a symlink kept as a symlink; the FIFO left out" \
+    bash -c "test -f '$STACK/new folder/-dash file' -a -L '$STACK/readme-link' -a ! -e '$STACK/fifo' && test \"\$(readlink '$STACK/readme-link')\" == README.md"
+  check "$what: copies belong to root, with the source's mode minus group/other write (umask 077 or not)" \
+    test "$(owner_mode_of "$STACK/new folder/group-writable") $(owner_mode_of "$STACK/new folder/private") $(owner_mode_of "$STACK/new folder") $(owner_mode_of "$STACK/platforms/casaos/install.sh")" \
+    == "0:0 644 0:0 600 0:0 755 0:0 755"
+  check "$what: symlinks in the stack folder are replaced, not written through" \
+    bash -c "test ! -L '$STACK/README.md' -a ! -L '$STACK/native' -a -d '$STACK/native' && cmp -s '$CRAFT/README.md' '$STACK/README.md' &&
+      test \"\$(cat '$WORK/canary')\" == canary -a -z \"\$(ls -A '$WORK/canary-dir')\""
+  check "$what: the updated installer applied it" has "$LOG" "Applying with the updated installer"
+}
+plant_links
+old_umask=$(umask)
+umask 077
+run_inst copy-notar PATH="$HERE/shims:$HERE/shims/casaos-bin:$WORK/nopy:$WORK/notar" TS_SOURCE_DIR="$CRAFT" -- --update -y
+umask "$old_umask"
+copy_checks "no tar"
+if [[ -n "$BB" ]]; then
+  plant_links
+  : >"$STATE/bbtar.log"
+  umask 077
+  run_inst copy-busybox PATH="$HERE/shims:$HERE/shims/casaos-bin:$WORK/nopy:$WORK/bbtools:$WORK/notar" TS_SOURCE_DIR="$CRAFT" -- --update -y
+  umask "$old_umask"
+  copy_checks "$BB_NAME"
+  check "$BB_NAME: its tar was not used for the copy" test ! -s "$STATE/bbtar.log"
+else
+  skip "copying with busybox's cp, mkdir and rm" "no busybox here (set CASAOS_TEST_BUSYBOX)"
+fi
+rm -rf "$STACK/new folder" "$STACK/readme-link"
+run_inst copy-back -- --update -y
+check "back on the working tree's files" test "$RC" == 0
+# TS_SOURCE_DIR naming the stack folder itself another way: there is
+# nothing to copy. (copy_tree removes each file before it copies, so a copy
+# of the folder onto itself would delete the repository files.)
+ln -sfn "$STACK" "$WORK/stack-link"
+pushd "$STACK" >/dev/null
+for how in dot:. link:"$WORK/stack-link" slashes:"$STACK//"; do
+  run_inst "self-${how%%:*}" TS_SOURCE_DIR="${how#*:}" -- --update -y
+  check "TS_SOURCE_DIR=${how#*:} (the stack folder): --update copies nothing, keeps the files and exits 0" \
+    bash -c "test '$RC' == 0 && ! grep -q 'Copying the repository files' '$LOG' && grep -q 'Applying with the updated installer' '$LOG' &&
+      cmp -s '$SRC/compose.yaml' '$STACK/compose.yaml' && cmp -s '$SRC/platforms/casaos/install.sh' '$STACK/platforms/casaos/install.sh'"
+done
+popd >/dev/null
+rm -f "$WORK/stack-link"
 
 section "Waiting and failure reports"
 set_config '{"gluetun_status": "Up 3 minutes (unhealthy)"}'
@@ -779,7 +954,7 @@ check "dashboard opens qBittorrent on the chosen port" grep -q "^  port_map: '80
 run_inst wizard-wt-uninstall TS_APPDATA="$APPDATA4" -- --uninstall --purge -y
 check "--uninstall --purge removes the stack folder, keeps downloads" test "$RC" == 0 -a ! -e "$APPDATA4/torrent-stack" -a -d "$WORK/DATA4/Media/Downloads/incomplete"
 
-section "Wizard (plain prompts, as on ZimaOS)"
+section "Wizard (plain prompts, as without whiptail)"
 APPDATA5="$WORK/DATA5/AppData"
 mkdir -p "$APPDATA5"
 # downloads, tz, provider, protocol, key, address, countries, user,

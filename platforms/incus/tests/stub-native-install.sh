@@ -13,7 +13,10 @@
 #     as environment variables, like the real installer), writes
 #     /root/torrent-stack.creds in the real installer's format, and serves
 #     a tiny web page on every web UI port from .env plus 9191, as systemd
-#     services, so the proxy devices and LAN addresses can be checked;
+#     services, so the proxy devices and LAN addresses can be checked; it
+#     ends with the REAL installer's end-of-install lines (install_summary,
+#     sourced from native/install.real.sh), which leave out the container's
+#     own addresses when the host script passes TS_HOST_SUMMARY=1;
 #   * on "apply" re-reads the ports from .env and restarts those servers;
 #   * on "self-update" runs the REAL installer's git step (git_update_checkout,
 #     sourced from native/install.real.sh, which run-tests.sh puts there),
@@ -37,7 +40,7 @@ record() {
   local k
   {
     printf '=== %s args: %s\n' "$(date -u +%FT%TZ)" "$*"
-    for k in "${ENV_KEYS[@]}" DEBIAN_FRONTEND http_proxy https_proxy; do
+    for k in "${ENV_KEYS[@]}" DEBIAN_FRONTEND http_proxy https_proxy TS_HOST_SUMMARY; do
       [[ -n "${!k+x}" ]] && printf 'env %s=%s\n' "$k" "${!k}"
     done
     if { exec 3<>/dev/net/tun; } 2>/dev/null; then
@@ -104,6 +107,25 @@ serve() {
   done
 }
 
+# The end of a real install's output: install_summary from the real
+# installer, sourced in a subshell (it defines functions with the same
+# names as this stub's), with the ports from .env and the VPN settings
+# still placeholders. $1: the first-run password if this run created it.
+summary() {
+  local pw=$1 addr fb qb jk fs
+  addr=$(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]; exit}')
+  fb=$(port_of FILEBROWSER_PORT) qb=$(port_of QBIT_WEBUI_PORT) jk=$(port_of JACKETT_PORT) fs=$(port_of FLARESOLVERR_PORT)
+  # shellcheck disable=SC2034  # FIRST_RUN_PASSWORD and S are read by install_summary
+  (
+    # shellcheck source=/dev/null  # the real native/install.sh, copied by run-tests.sh
+    source "$ROOT/native/install.real.sh"
+    FIRST_RUN_PASSWORD=$pw
+    declare -A S=([port_filebrowser]=$fb [port_qbittorrent]=$qb [port_jackett]=$jk [port_flaresolverr]=$fs
+      [vpn_configured]=no [vpn_missing]="WIREGUARD_PRIVATE_KEY WIREGUARD_ADDRESSES")
+    install_summary "$addr"
+  )
+}
+
 cmd=${1:-}
 record "$@"
 case "$cmd" in
@@ -112,6 +134,7 @@ install)
   create_env
   write_server
   serve
+  first_pw=""
   if [[ ! -f "$CREDS" ]]; then
     ip=$(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]; exit}')
     (
@@ -123,9 +146,9 @@ FileBrowser: http://$ip:$(port_of FILEBROWSER_PORT)   user: admin   password: $S
   (until you set a real qBittorrent login; then admin uses QBITTORRENT_PASSWORD)
 EOF
     )
-    echo "    first-run login:      user admin   password $STUB_PASSWORD"
+    first_pw=$STUB_PASSWORD
   fi
-  echo " ok Install finished (stub)."
+  summary "$first_pw"
   ;;
 self-update)
   ref=""

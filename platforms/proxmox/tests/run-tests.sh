@@ -407,6 +407,10 @@ record_tests() {
   check_not "host proxy variables are not copied into the guest" grep -qiE 'https?_proxy=' <<<"$(python3 -I "$HERE/lib/calls.py" "$STATE" exec-cmds)"
   # shellcheck disable=SC2016  # a literal $cmd in the recorded guest script
   check "native/install.sh install was invoked" grep -q 'native/install.sh "\$cmd"' <<<"$(python3 -I "$HERE/lib/calls.py" "$STATE" exec-cmds)"
+  # The container's own address on the host's bridge is the one to open, so
+  # native/install.sh prints its URL list (only the Incus script's proxy
+  # mode passes TS_HOST_SUMMARY=1 to leave it out).
+  check_not "native/install.sh keeps its own URL list (no TS_HOST_SUMMARY)" grep -q TS_HOST_SUMMARY <<<"$(python3 -I "$HERE/lib/calls.py" "$STATE" exec-cmds)"
   local settings="$STATE/pushed/101/root__.torrent-stack-proxmox.env"
   check "settings file pushed" test -f "$settings"
   check "settings: TZ" grep -qx 'TZ=America/New_York' "$settings"

@@ -180,6 +180,16 @@ t_proxy() {
   check_out "FileBrowser login shown without the container URL" "FileBrowser: user: admin   password: stub-password-123" cat "$WORK/proxy.log"
   check "no container address next to the logins" bash -c "! grep -E '^ +(env-editor|FileBrowser): +https?://' '$WORK/proxy.log'"
   check_out "creds file note printed as is" "(until you set a real qBittorrent login" cat "$WORK/proxy.log"
+  # native/install.sh is told that this script prints the addresses
+  # (TS_HOST_SUMMARY=1), so its own end-of-install lines (the real
+  # install_summary, which the stub runs) give the login only: no URL with
+  # the container's bridge address anywhere, one set of URLs (the host's).
+  local cip
+  cip=$(incus exec "$n" -- ip -4 -o addr show dev eth0 scope global | awk '{split($4, a, "/"); print a[1]; exit}')
+  check_out "native install told the host prints the addresses" "env TS_HOST_SUMMARY=1" gexec "$n" cat /root/stub-calls.log
+  check_out "native's own end lines: the login only" "env-editor first-run login: user admin   password stub-password-123" cat "$WORK/proxy.log"
+  check "  and a pointer to the host summary, above it" awk '/addresses to open are printed below by the host script/ { p = NR } /Open in a browser \(through the Incus host\)/ { o = NR } END { exit !(p && o && p < o) }' "$WORK/proxy.log"
+  check "no URL with the container's own address (${cip:-none})" bash -c "[[ -n '$cip' ]] && ! grep -q 'http://$cip:' '$WORK/proxy.log'"
   check_out "native install ran with TZ" "env TZ=Europe/Berlin" gexec "$n" cat /root/stub-calls.log
   check_out "native install got PUID" "env PUID=1000" gexec "$n" cat /root/stub-calls.log
   check_out "native install got DOWNLOADS_PATH" "env DOWNLOADS_PATH=/mnt/downloads" gexec "$n" cat /root/stub-calls.log
@@ -296,6 +306,9 @@ t_proxy() {
   # Resume (idempotent re-run of the in-container install).
   if env TS_SOURCE_DIR="$WORK/src" bash "$INSTALLER" --resume "$n" >"$WORK/proxy-resume.log" 2>&1; then ok "resume exit 0"; else bad "resume exit 0"; fi
   check_out "resume passed the saved TZ again" "2" bash -c "incus exec $n -- grep -c 'env TZ=Europe/Berlin' /root/stub-calls.log"
+  cip=$(incus exec "$n" -- ip -4 -o addr show dev eth0 scope global | awk '{split($4, a, "/"); print a[1]; exit}')
+  check_out "resume: native names the creds file instead" "env-editor first-run login is in /root/torrent-stack.creds" cat "$WORK/proxy-resume.log"
+  check "resume: no URL with the container's own address (${cip:-none})" bash -c "[[ -n '$cip' ]] && ! grep -q 'http://$cip:' '$WORK/proxy-resume.log'"
   # Uninstall needs confirmation.
   check_out "uninstall refuses without --yes" "without confirmation" bash "$INSTALLER" --uninstall "$n" </dev/null
   check "instance still there" incus info "$n"
@@ -590,6 +603,10 @@ t_lan_bridge() {
   check "DHCP address on the test LAN ($ip)" bash -c "[[ $ip == 192.168.77.* ]]"
   check "no proxy devices" bash -c "! incus config device list $n | grep -q proxy-"
   check_out "printed URL is the container's LAN address" "http://${ip}:9191" cat "$WORK/lanbr.log"
+  # Here the container's own address is the one to open, so native/install.sh
+  # is not told to leave out its URL list.
+  check "native install not told to leave out its URLs" bash -c "! incus exec $n -- grep -q TS_HOST_SUMMARY /root/stub-calls.log"
+  check_out "native's own end lines list the LAN URL" "env-editor (settings):  http://${ip}:9191" cat "$WORK/lanbr.log"
   check_out "MAC/DHCP reservation hint" "reserve this IP" cat "$WORK/lanbr.log"
   check_out "env-editor on the LAN address" "stub env-editor on 9191 from 192.168.77.1" curl -s --max-time 5 "http://${ip}:9191/"
   check_out "qBittorrent on the LAN address" "stub qbittorrent on 8090" curl -s --max-time 5 "http://${ip}:8090/"

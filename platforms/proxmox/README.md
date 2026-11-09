@@ -27,7 +27,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/rob-paprocki/qbittorrent
    * **Advanced** asks for every setting (see the next section) and shows a summary, which you can accept with **Create** or answer again with **Do-Over**.
 3. Wait. The script downloads the newest Debian 13 template, creates and starts the container, updates its packages, copies in this repository and runs the in-container installer. Its output scrolls past in your terminal.
 4. At the end you see the **env-editor address** (`http://<container-ip>:9191`) and its **first-run login**. Write the login down: it is only shown once. The installer also keeps a copy in `/root/torrent-stack.creds` inside the container. Delete that file once you've noted the login.
-5. Open the env-editor in your browser, log in, enter your VPN provider's details, then press **Preview changes** and **Apply**. Gluetun, qBittorrent, Jackett and FlareSolverr only start once real VPN settings are saved. Until then only the env-editor and FileBrowser run.
+5. Open the env-editor in your browser, log in, enter your VPN provider's details, then press **Preview changes** and **Apply**. Gluetun, qBittorrent, Jackett and FlareSolverr only start once real VPN settings are saved. Until then only the env-editor and FileBrowser run. Set a qBittorrent user and password there too: the password is also FileBrowser's (user `admin`), so the editor refuses `admin` and anything under 5 or over 72 bytes, with **Not saved**.
 
 ## What the wizard asks
 
@@ -212,13 +212,14 @@ There was no Proxmox VE host to test on. What was done instead:
 
 * `bash -n` and `shellcheck -S warning` are clean on `install.sh`, `tests/run-tests.sh` and `tests/shims/whiptail`.
 * **Command stand-ins.** `tests/shims/` has stand-ins for `pct`, `pveam`, `pvesm`, `pvesh`, `pveversion`, `whiptail` (answers come from environment variables), `timedatectl`, `modprobe`, `modinfo` and `dpkg`. They record every call. The `pct` stand-in checks `pct create` and `pct set` against the official Proxmox VE API schema (the same `apidoc.js` the [pct manual](https://pve.proxmox.com/pve-docs/pct.1.html) is generated from): option names, types, ranges, enums, patterns and the property strings for `net0`, `dev0`, `mp0`, `rootfs` and `features`. The formats are re-implemented after Proxmox's `pve-common` and `pve-container` source. A self-test shows it rejects 16 kinds of bad arguments. Like `pct`, it refuses `exec` and `push` on a stopped container.
-* **Record tests** (259 checks, 20 of them the self-test above; no containers). For these the `pct` stand-in also answers `test -f` and `cat` from the files that were pushed, and it can pretend the container gets no IPv4 address or does not start. Checked:
+* **Record tests** (260 checks, 20 of them the self-test above; no containers). For these the `pct` stand-in also answers `test -f` and `cat` from the files that were pushed, and it can pretend the container gets no IPv4 address or does not start. Checked:
   * the exact `pct create` arguments for Default, Advanced (static IP, gateway in subnet, VLAN, DNS, SSH key, password retry, Do-Over) and Proxmox VE 8.0;
   * Do-Over: the password and SSH key from the first pass can be kept, or cleared by leaving them empty;
   * the root password reaching only `chpasswd`'s stdin, never a command line or a log;
   * the `lxc.idmap`, `/etc/subuid` and `/etc/subgid` lines and folder ownership in both mapping modes;
   * newest-template selection, and falling back to an already-downloaded template when offline;
   * what goes into the source tarball and what is kept out;
+  * `native/install.sh` is not given `TS_HOST_SUMMARY` (which makes it leave out its own URL list, as the Incus script's proxy mode needs): the container sits on the host's bridge with its own LAN address, so the installer's own URLs are the right ones;
   * the refusals (Proxmox 7, arm64, a `TS_GUEST_PROXY` with a password, not root, ID in use, bad IP, gateway outside the subnet, system folder, missing bridge, PUID 0, wrong storage, no whiptail on a terminal, Cancel);
   * `--update`, `--resume` and finding the container by its tag;
   * **update with live config files:** the clone snippet from `install.sh` and the git step of the real `native/install.sh self-update`, run with real `git` against a local "upstream" whose new commits change the tracked `qBittorrent.conf` and `ServerConfig.json`. The live files keep their content, owner and mode, a seed you deleted stays deleted, a live file that upstream starts tracking is kept, a file removed upstream is removed, a hand-edited file that the update would change stops the update (and is named), switching to a tag works, and a failed update leaves the live files alone. (The old `git pull` refused this update; that was reproduced first.);

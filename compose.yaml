@@ -155,11 +155,19 @@ services:
       # The image's default database location is not mounted, so users and
       # settings were lost whenever the container was recreated. Keep the
       # database in the mounted config folder, and set the "admin" user's
-      # password from QBITTORRENT_PASSWORD on every start.
+      # password from QBITTORRENT_PASSWORD on every start (FileBrowser needs
+      # 5 to 72 bytes and ignores "admin"; see the README's FileBrowser part).
       FILEBROWSER_DATABASE_PATH: /config/database.sqlite
       FILEBROWSER_ADMIN_PASSWORD: ${QBITTORRENT_PASSWORD}
-    # The image always runs as its own uid 1000; membership of the PGID group
-    # gives it the stack's access to the downloads and its config folder.
+    # The image always runs as its own uid 1000, whatever PUID is. The PGID
+    # group lets it in where it is not the owner: its config folder must be
+    # writable for that group, and in the downloads it can change only what
+    # the group may write. qBittorrent creates files and folders without
+    # group write (LinuxServer's default umask 022), so with a PUID other
+    # than 1000 FileBrowser can rename what sits directly in a group-writable
+    # downloads folder and delete the files there, but not change or delete
+    # anything inside the folders qBittorrent made (README, FileBrowser:
+    # UMASK=002 on qbittorrent fixes that for new downloads).
     group_add:
       - "${PGID}"
     ports:

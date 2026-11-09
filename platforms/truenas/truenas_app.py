@@ -24,6 +24,7 @@ runs the wizard and the TrueNAS API calls that carry no secrets (through
   fetch-plugin    install the pinned qBittorrent Jackett search plugin
   source-check    refuse to overwrite a folder the installer did not make
   json-get   pick fields out of `midclt` JSON output (for the shell script)
+  password-check  check a qBittorrent password typed in the wizard (stdin)
   same       compare settings between two values files
   get        print one value from a values file
 
@@ -103,6 +104,16 @@ INT_KEYS = ("PUID", "PGID", "QBIT_WEBUI_PORT", "JACKETT_PORT", "FLARESOLVERR_POR
 # The file install.sh writes into the repository copy on the dataset. Only
 # a folder holding it is ever emptied and refilled (see source-check).
 SOURCE_MARKER = ".torrent-stack-source"
+
+# The qBittorrent password is also FileBrowser's admin password (compose.yaml:
+# FILEBROWSER_ADMIN_PASSWORD). FileBrowser Quantum (v2.0.2-stable) sets it
+# again on every start, except when it is "admin": then a new database gets
+# a random password and an existing one keeps its old one. When it sets the
+# password it refuses fewer than 5 bytes, and its bcrypt hash cannot take
+# more than 72 bytes. qBittorrent's own minimum of 6 characters (its Web UI
+# refuses shorter ones) covers the 5 bytes.
+QBIT_PASSWORD_MIN_CHARS = 6
+FILEBROWSER_PASSWORD_MAX_BYTES = 72
 
 KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 APP_NAME_RE = re.compile(r"^[a-z]([-a-z0-9]*[a-z0-9])?$")
@@ -217,6 +228,26 @@ def vpn_missing(values: dict[str, str], example: dict[str, str]) -> list[str]:
     return missing
 
 
+def qbit_password_problem(password: str, name: str = "QBITTORRENT_PASSWORD") -> str:
+    """Why password cannot be the qBittorrent password (which is also
+    FileBrowser's admin password; see QBIT_PASSWORD_MIN_CHARS), or "" when
+    it can. name is what the message calls it."""
+    if password == "admin":
+        return (f"{name} cannot be 'admin': it is also FileBrowser's admin password, and "
+                "FileBrowser ignores 'admin' (it would make up a password of its own, or keep "
+                "its old one)")
+    if len(password) < QBIT_PASSWORD_MIN_CHARS:
+        return f"{name} must be at least {QBIT_PASSWORD_MIN_CHARS} characters"
+    # Bytes, not characters: what bcrypt counts.
+    n = len(password.encode("utf-8", "surrogateescape"))
+    if n > FILEBROWSER_PASSWORD_MAX_BYTES:
+        return (f"{name} is {n} bytes long; at most {FILEBROWSER_PASSWORD_MAX_BYTES} work, "
+                "because it is also FileBrowser's admin password and FileBrowser (bcrypt) "
+                "cannot store a longer one (a character outside ASCII, such as an accented "
+                "letter, takes 2 to 4 bytes)")
+    return ""
+
+
 def _int(values: dict[str, str], key: str, lo: int, hi: int, errors: list[str]) -> int | None:
     raw = values.get(key, "").strip()
     try:
@@ -260,9 +291,9 @@ def validate(values: dict[str, str], example: dict[str, str], *, need_paths: boo
     for key in ("QBITTORRENT_USER", "QBITTORRENT_PASSWORD"):
         if is_placeholder(values, example, key):
             errors.append(f"{key} is not set")
-    if len(values.get("QBITTORRENT_PASSWORD", "")) < 6:
-        # qBittorrent's Web UI refuses passwords shorter than 6 characters.
-        errors.append("QBITTORRENT_PASSWORD must be at least 6 characters")
+    problem = qbit_password_problem(values.get("QBITTORRENT_PASSWORD", ""))
+    if problem:
+        errors.append(problem)
     if need_paths:
         for key in PATH_KEYS:
             if not values.get(key, "").startswith("/"):
@@ -1148,6 +1179,18 @@ def _json_path(node, segments: list[str]):
         yield from _json_path(node[int(head)], rest)
 
 
+def cmd_password_check(args) -> int:
+    """For the wizard: read a qBittorrent password on stdin (never from the
+    command line), print why it cannot be used and return 1, or return 0.
+    The same rules as validate()."""
+    password = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
+    problem = qbit_password_problem(password, "The password")
+    if problem:
+        print(problem + ".")
+        return 1
+    return 0
+
+
 def cmd_json_get(args) -> int:
     """Print the values at a dotted path ('*' walks a list) of the JSON on
     stdin, one per line; objects and lists are printed as JSON. A path that
@@ -1263,6 +1306,9 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("json-get")
     s.add_argument("path")
     s.set_defaults(fn=cmd_json_get)
+
+    s = sub.add_parser("password-check")
+    s.set_defaults(fn=cmd_password_check)
 
     args = p.parse_args(argv)
     try:

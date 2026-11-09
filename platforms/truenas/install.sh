@@ -112,6 +112,8 @@ Environment variables (all optional; they also pre-fill the wizard):
                               root can read, e.g.
                               TS_WIREGUARD_PRIVATE_KEY_FILE=/root/wg.key
                               TS_QBITTORRENT_PASSWORD_FILE=/root/qbit.pw
+                              (it is also FileBrowser's admin password:
+                              6 characters to 72 bytes, not 'admin')
                               (CONFIG_PATH and the download paths come from
                               the datasets; Watchtower is not used.)
   TS_SOURCE_DIR=/path         Use this checkout instead of cloning GitHub.
@@ -762,7 +764,7 @@ ask_ports() {
 }
 
 ask_common() {
-  local puid pgid user pw url
+  local puid pgid user pw url why
   ui_input puid "PUID" "User ID the apps run as (owner of downloaded files). 568 is TrueNAS's built-in 'apps' user; use your own user's ID (id -u NAME) if you want the files to be yours." "${CUR[PUID]}"
   ui_input pgid "PGID" "Group ID the apps run as. 568 is TrueNAS's 'apps' group." "${CUR[PGID]}"
   layer_add "$WORK/l_answers.nul" PUID "$puid" PGID "$pgid"
@@ -785,10 +787,14 @@ Change them?" no; then
 
   ui_input user "qBittorrent user" "qBittorrent web UI username. (FileBrowser's admin user is always 'admin', with the same password.)" "${CUR[QBITTORRENT_USER]}"
   layer_add "$WORK/l_answers.nul" QBITTORRENT_USER "$user"
+  # The password is also FileBrowser's admin password. The helper checks it
+  # with the same rules as the final check of all settings (read on stdin:
+  # printf is a bash builtin, so the password is on no command line).
   while :; do
-    ui_password pw "qBittorrent password" "qBittorrent web UI password, 6 characters or more. Leave empty to $([[ $APP_EXISTS == 1 ]] && echo 'keep the current one' || echo 'have one generated (shown at the end)')."
-    [[ -z "$pw" || ${#pw} -ge 6 ]] && break
-    ui_note "Password too short" "qBittorrent needs at least 6 characters."
+    ui_password pw "qBittorrent password" "qBittorrent web UI password, also FileBrowser's admin password: 6 characters or more, at most 72 bytes (a character outside ASCII, such as an accented letter, takes 2 to 4 bytes), not 'admin'. Leave empty to $([[ $APP_EXISTS == 1 ]] && echo 'keep the current one' || echo 'have one generated (shown at the end)')."
+    [[ -z "$pw" ]] && break
+    why=$(printf '%s' "$pw" | helper password-check) && break
+    ui_note "Password not accepted" "$why"
   done
   [[ -n "$pw" ]] && layer_add "$WORK/l_answers.nul" QBITTORRENT_PASSWORD "$pw"
 

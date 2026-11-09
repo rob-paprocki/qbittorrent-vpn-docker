@@ -48,11 +48,13 @@ RESTART_MAP: dict[str, list[str]] = {
     "FLARESOLVERR_PORT": ["gluetun", "flaresolverr"],
     "FILEBROWSER_PORT": ["filebrowser"],
 
-    # qBittorrent credentials — re-seed configs then recycle
+    # qBittorrent credentials — re-seed configs then recycle. FileBrowser
+    # needs no seeding: it takes the password from FILEBROWSER_ADMIN_PASSWORD
+    # (compose.yaml) every time it starts, so recreating it is enough.
     "QBITTORRENT_USER": ["qbittorrent", "gluetun", "_reseed_qbit"],
     "QBITTORRENT_PASSWORD": [
         "qbittorrent", "filebrowser", "gluetun",
-        "_reseed_qbit", "_reseed_filebrowser",
+        "_reseed_qbit",
     ],
     "SCRIPT_NOTIFY_URL": ["gluetun"],
 

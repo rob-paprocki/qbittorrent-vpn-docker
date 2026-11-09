@@ -1409,12 +1409,17 @@ push_settings() {
 # to the terminal and keep a private copy. sed -u (unbuffered), not tr: tr
 # holds its output back in 4 KiB blocks when it writes to a pipe, so the
 # progress lines of a long install would only show up at the end.
+# In proxy mode the container's own addresses (its address on the Incus
+# bridge, the container ports) do not work from the LAN; print_access shows
+# the host's after this. TS_HOST_SUMMARY=1 makes native/install.sh print
+# only the login at the end of an install and point to that summary.
 run_native() {
-  local cmd=$1
+  local cmd=$1 vars=()
+  [[ "$(inc config get "$INST" "$KEY_MODE" 2>/dev/null)" == proxy ]] && vars=(TS_HOST_SUMMARY=1)
   echo
   echo "  ${BOLD}Running native/install.sh $* in container ${NAME}${CL}"
   echo "  ----------------------------------------------------------------"
-  if ! guest_bash "$GUEST_NATIVE" "$GUEST_DIR" "$GUEST_SETTINGS" "$@" </dev/null 2>&1 |
+  if ! guest env ${vars[@]+"${vars[@]}"} bash -c "$GUEST_NATIVE" bash "$GUEST_DIR" "$GUEST_SETTINGS" "$@" </dev/null 2>&1 |
     sed -u 's/\r//g' | tee -a "$INSTALL_LOG"; then
     echo "  ----------------------------------------------------------------"
     # Only an install's output can hold the first-run password worth keeping.

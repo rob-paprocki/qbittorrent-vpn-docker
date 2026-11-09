@@ -942,6 +942,39 @@ gate_note() {
     fi
 }
 
+# install_summary IP: the end of `install`, the web addresses and the
+# first-run login. A host script that reaches the container through
+# forwarded ports or at another address than the container's own (the
+# Incus script in proxy mode) sets TS_HOST_SUMMARY=1: the addresses below
+# would not work from the LAN, and the host script prints the right ones
+# after this, so only the login is printed here.
+install_summary() {
+    local ip="$1"
+    msg_ok "Install finished."
+    if [[ "${TS_HOST_SUMMARY:-}" == 1 ]]; then
+        if [[ -n "$FIRST_RUN_PASSWORD" ]]; then
+            echo "  env-editor first-run login: user admin   password $FIRST_RUN_PASSWORD"
+            echo "    (also saved in $CREDS_FILE; delete that file once noted)"
+        elif [[ -f "$CREDS_FILE" ]]; then
+            echo "  env-editor first-run login is in $CREDS_FILE"
+        fi
+        echo "  The web UI addresses to open are printed below by the host script."
+    else
+        echo "  env-editor (settings):  http://$ip:$ENV_EDITOR_PORT"
+        if [[ -n "$FIRST_RUN_PASSWORD" ]]; then
+            echo "    first-run login:      user admin   password $FIRST_RUN_PASSWORD"
+            echo "    (also saved in $CREDS_FILE; delete that file once noted)"
+        elif [[ -f "$CREDS_FILE" ]]; then
+            echo "    first-run login is in $CREDS_FILE"
+        fi
+        echo "  FileBrowser:            http://$ip:${S[port_filebrowser]}"
+        echo "  qBittorrent (VueTorrent): http://$ip:${S[port_qbittorrent]}"
+        echo "  Jackett:                http://$ip:${S[port_jackett]}"
+        echo "  FlareSolverr:           http://$ip:${S[port_flaresolverr]}"
+    fi
+    gate_note
+}
+
 # ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
@@ -986,19 +1019,7 @@ cmd_install() {
     echo
     cmd_status_lines
     echo
-    msg_ok "Install finished."
-    echo "  env-editor (settings):  http://$ip:$ENV_EDITOR_PORT"
-    if [[ -n "$FIRST_RUN_PASSWORD" ]]; then
-        echo "    first-run login:      user admin   password $FIRST_RUN_PASSWORD"
-        echo "    (also saved in $CREDS_FILE; delete that file once noted)"
-    elif [[ -f "$CREDS_FILE" ]]; then
-        echo "    first-run login is in $CREDS_FILE"
-    fi
-    echo "  FileBrowser:            http://$ip:${S[port_filebrowser]}"
-    echo "  qBittorrent (VueTorrent): http://$ip:${S[port_qbittorrent]}"
-    echo "  Jackett:                http://$ip:${S[port_jackett]}"
-    echo "  FlareSolverr:           http://$ip:${S[port_flaresolverr]}"
-    gate_note
+    install_summary "$ip"
 }
 
 cmd_update() {
