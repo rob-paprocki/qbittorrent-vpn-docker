@@ -30,6 +30,37 @@ It runs with Docker Compose on any Linux host, and one-line installers set it up
   <img alt="Diagram of the stack. At the top is the VPN provider, then the internet. A two-way arrow marked 'only way out' joins it to a box called Gluetun's network. Inside the box, Gluetun (VPN tunnel and firewall, publishing ports 8090, 9117 and 8191) passes the forwarded port to qBittorrent with VueTorrent on 8090. qBittorrent searches through Jackett on 9117, and Jackett uses FlareSolverr on 8191. Below the box, outside it, are the env-editor on port 9191, which runs on the host, edits .env and restarts the apps, and FileBrowser on 8081, which has its own network and shows the downloads. A note at the bottom says that native mode on Proxmox VE and Incus runs the same apps as systemd units in one Debian 13 container, kept on the VPN by an nftables kill switch." src="docs/images/architecture-light.svg">
 </picture>
 
+<details>
+<summary>Diagram source (Mermaid)</summary>
+
+```mermaid
+flowchart TD
+  %% How the stack fits together (README, "How it works").
+  %% Source for architecture.svg (and its -light/-dark renders).
+  %% After editing, regenerate them from the repo root: docs/images/render.sh
+  V["VPN provider,<br/>then the internet"]
+  subgraph N["Gluetun's network"]
+    G["Gluetun: VPN<br/>tunnel, firewall.<br/>Publishes 8090,<br/>9117 and 8191"]
+    Q["qBittorrent<br/>with VueTorrent<br/>:8090"]
+    J["Jackett :9117"]
+    F["FlareSolverr<br/>:8191"]
+  end
+  E["env-editor<br/>:9191, on the<br/>host. Edits<br/>.env, restarts<br/>the apps"]
+  B["FileBrowser<br/>:8081, own<br/>network. Shows<br/>the downloads"]
+  V <-->|"only way out"| N
+  G -->|"forwarded<br/>port"| Q
+  Q -->|"search"| J
+  J --> F
+  F ~~~ E
+  F ~~~ B
+  NOTE["Native mode (Proxmox VE,<br/>Incus): the same apps as<br/>systemd units in one Debian<br/>13 container, kept on the VPN<br/>by an nftables kill switch"]:::note
+  E ~~~ NOTE
+  B ~~~ NOTE
+  classDef note stroke-dasharray:4 3
+```
+
+</details>
+
 1. Gluetun connects to your VPN provider. qBittorrent, Jackett and FlareSolverr share its network (`network_mode: service:gluetun`), so their traffic goes through the tunnel or nowhere.
 2. Their web UIs are published on the `gluetun` container. The default ports are 8090 for qBittorrent with [VueTorrent](https://github.com/VueTorrent/VueTorrent), 9117 for Jackett and 8191 for FlareSolverr.
 3. When the VPN assigns a forwarded port, Gluetun runs `update-qbittorrent.sh`, which logs in to qBittorrent and sets it as the listening port.

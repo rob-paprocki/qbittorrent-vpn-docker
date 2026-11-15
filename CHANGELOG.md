@@ -10,6 +10,13 @@ A new major version means an existing install may need manual steps when you upd
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-11-15
+**Upgrading:** nothing to do.
+
+### Changed
+
+- The README's architecture diagram has its Mermaid source in a collapsed section under the picture.
+
 ## [4.0.0] - 2026-11-15
 **Upgrading:** two entries below are marked **Breaking** and need a step from you: FileBrowser's new login (set a real `QBITTORRENT_PASSWORD`) and the Jackett and FlareSolverr port mapping.
 

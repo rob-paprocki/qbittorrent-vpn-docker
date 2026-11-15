@@ -5,6 +5,7 @@ name: Release
 # SHA256SUMS) and the GitHub release.
 on:
   push:
+    branches: [main]
     tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
@@ -17,11 +18,40 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  which:
+    # A push to main releases only when that commit carries a vX.Y.Z tag (cut-release pushes
+    # the commit and its tag together, and the tag push alone doesn't always start a run).
     if: github.repository == 'rob-paprocki/qbittorrent-vpn-docker'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.find.outputs.tag }}
+    steps:
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            tag="$INPUT_TAG"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag=$(gh api "repos/$GITHUB_REPOSITORY/tags" --paginate \
+                    --jq ".[] | select(.commit.sha == \"$GITHUB_SHA\") | .name" \
+                  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+          fi
+          [ -n "$tag" ] || echo "No version tag on $GITHUB_SHA; nothing to release."
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: which
+    if: needs.which.outputs.tag != ''
+    concurrency: release-${{ needs.which.outputs.tag }}
+    runs-on: ubuntu-latest
     env:
-      TAG: ${{ inputs.tag || github.ref_name }}
+      TAG: ${{ needs.which.outputs.tag }}
     steps:
       - name: Tag must be exactly vX.Y.Z
         run: |
