@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+#
+# tests/shims/whiptail - non-interactive stand-in for whiptail, for testing
+# platforms/proxmox/install.sh.
+#
+# Behaves like whiptail's I/O contract: the answer of an input, password,
+# menu or radiolist box goes to stderr; yes/no and cancel are the exit
+# status (0 = OK/Yes, 1 = Cancel/No, 255 = Esc). Instead of asking, it
+# answers from environment variables keyed by the box title (upper case,
+# anything but A-Z/0-9 turned into _):
+#   WT_ANSWER_<TITLE>_<N>  answer for the N-th time that title is shown
+#   WT_ANSWER_<TITLE>      answer for every other time
+# Answers: text for input/password boxes, the tag for menus/radiolists,
+# "yes"/"no"/"esc" for yes/no boxes, "__CANCEL__" to press Cancel.
+# Without an answer it takes the box's default (the initial text, the item
+# marked ON, Yes unless --defaultno). Each call is appended to
+# $PVE_SHIM_STATE/whiptail.jsonl (password answers are masked).
+#
+# License: MIT (see LICENSE in the repository root).
+
+set -Eeuo pipefail
+
+state="${PVE_SHIM_STATE:-/tmp/pve-shim-state}"
+mkdir -p "$state"
+
+title="" box="" text="" defaultno=0 default_item=""
+items=()
+init=""
+while (($#)); do
+  case "$1" in
+  --title) title=$2; shift 2 ;;
+  --backtitle | --yes-button | --no-button | --ok-button | --cancel-button) shift 2 ;;
+  --default-item) default_item=$2; shift 2 ;;
+  --defaultno) defaultno=1; shift ;;
+  --nocancel | --fullbuttons | --scrolltext | --separate-output | --clear | --noitem | --notags | --topleft) shift ;;
+  --msgbox | --yesno | --infobox)
+    box=${1#--}; text=$2; shift 4 ;;
+  --inputbox | --passwordbox)
+    box=${1#--}; text=$2; shift 4
+    if (($#)) && [[ "$1" != --* ]]; then init=$1; shift; fi
+    ;;
+  --menu | --radiolist | --checklist)
+    box=${1#--}; text=$2; shift 5
+    while (($#)) && [[ "$1" != --* ]]; do items+=("$1"); shift; done
+    ;;
+  *) echo "whiptail shim: unexpected argument '$1'" >&2; exit 2 ;;
+  esac
+done
+
+key=$(printf '%s' "$title" | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]/_/g')
+count_file="$state/whiptail.count.$key"
+n=$(($(cat "$count_file" 2>/dev/null || echo 0) + 1))
+echo "$n" >"$count_file"
+var_n="WT_ANSWER_${key}_${n}"
+var_any="WT_ANSWER_${key}"
+answer=""
+have_answer=0
+if [[ -n "${!var_n+x}" ]]; then
+  answer=${!var_n}
+  have_answer=1
+elif [[ -n "${!var_any+x}" ]]; then
+  answer=${!var_any}
+  have_answer=1
+fi
+
+rc=0
+out=""
+case "$box" in
+msgbox | infobox) ;;
+yesno)
+  if ((have_answer)); then
+    case "$answer" in yes) rc=0 ;; no) rc=1 ;; esc) rc=255 ;; *) rc=2 ;; esac
+  else
+    rc=$defaultno
+  fi
+  ;;
+inputbox | passwordbox)
+  if ((have_answer)); then out=$answer; else out=$init; fi
+  [[ "$out" == __CANCEL__ ]] && rc=1 && out=""
+  ;;
+menu)
+  if ((have_answer)); then out=$answer
+  elif [[ -n "$default_item" ]]; then out=$default_item
+  else out=${items[0]:-}
+  fi
+  [[ "$out" == __CANCEL__ ]] && rc=1 && out=""
+  ;;
+radiolist | checklist)
+  if ((have_answer)); then
+    out=$answer
+  else
+    for ((i = 0; i + 2 < ${#items[@]}; i += 3)); do
+      if [[ "${items[i + 2]^^}" == ON ]]; then out=${items[i]}; break; fi
+    done
+  fi
+  [[ "$out" == __CANCEL__ ]] && rc=1 && out=""
+  ;;
+*) echo "whiptail shim: no box type given" >&2; exit 2 ;;
+esac
+
+logged=$out
+[[ "$box" == passwordbox && -n "$out" ]] && logged="***(${#out} chars)"
+python3 -I -c 'import json, sys; print(json.dumps({"title": sys.argv[1], "box": sys.argv[2], "n": int(sys.argv[3]), "text": sys.argv[4][:200], "answer": sys.argv[5], "rc": int(sys.argv[6])}))' \
+  "$title" "$box" "$n" "$text" "$logged" "$rc" >>"$state/whiptail.jsonl"
+
+[[ -n "$out" ]] && printf '%s' "$out" >&2
+exit "$rc"

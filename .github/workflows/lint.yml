@@ -1,0 +1,77 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Images and diagrams: no Mermaid (the GitHub mobile app
+      # shows it as raw code), and every image a doc shows from the repo must
+      # follow the reader's theme: an SVG with its own prefers-color-scheme
+      # dark palette, or a NAME-light/NAME-dark pair the doc shows both of.
+      - name: Check Markdown diagrams and images
+        run: |
+          bad=0
+          if git ls-files -z '*.md' | xargs -0 -r grep -nE '^[[:space:]]*(```|~~~)[[:space:]]*mermaid'; then
+            echo "::error::Mermaid block found. Commit a rendered image instead (see docs/images/render.sh)."; bad=1
+          fi
+          for f in $(git ls-files '*.md'); do
+            for img in $(awk '/^[[:space:]]*(```|~~~)/{c=!c; next} !c' "$f" | grep -oE '!\[[^]]*\]\([^) ]+|<(img|source)[^>]*(src|srcset)="[^"]+' | sed -E 's/.*[("]//; s/[?#].*//' | grep -vE '^(https?:|data:)' || true); do
+              p="$(dirname "$f")/$img"
+              case "$img" in
+                *-light.*) [ -f "$p" ] && grep -qF "${img/-light./-dark.}" "$f" && continue ;;
+                *-dark.*) [ -f "$p" ] && grep -qF "${img/-dark./-light.}" "$f" && continue ;;
+                *.svg) grep -qE 'prefers-color-scheme: ?dark' "$p" 2>/dev/null && continue ;;
+              esac
+              echo "::error file=${f}::$img does not follow the reader's light or dark theme."; bad=1
+            done
+          done
+          exit "$bad"
+      - name: Run shellcheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          severity: warning
+          scandir: '.'
+
+  compose-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate compose with .env.example
+        run: |
+          cp .env.example .env
+          docker compose config -q
+      - name: Check env <-> compose symmetry
+        run: |
+          python3 - <<'PY'
+          import re, pathlib, sys
+          compose = pathlib.Path('compose.yaml').read_text()
+          env = pathlib.Path('.env.example').read_text()
+          refs = set(re.findall(r'\$\{([A-Z_][A-Z0-9_]*)\}', compose))
+          defs = set()
+          for line in env.splitlines():
+              line = line.strip()
+              if not line or line.startswith('#'): continue
+              if '=' in line:
+                  defs.add(line.split('=', 1)[0])
+          missing = refs - defs
+          # Compose reads COMPOSE_PROFILES from .env itself; compose.yaml
+          # never references it.
+          unused = defs - refs - {"COMPOSE_PROFILES"}
+          if missing: print(f"referenced in compose but missing from .env.example: {sorted(missing)}"); sys.exit(1)
+          if unused: print(f"defined in .env.example but unused in compose: {sorted(unused)}"); sys.exit(1)
+          print("env <-> compose symmetric")
+          PY
+
+  json-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate ServerConfig.json
+        run: python3 -c "import json; json.load(open('configs/jackett/Jackett/ServerConfig.json'))"

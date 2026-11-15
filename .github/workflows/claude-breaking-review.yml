@@ -1,0 +1,81 @@
+name: Breaking-change review
+
+# Fires when Renovate (or anyone) labels a PR `breaking-candidate`.
+# Claude reads the upstream changelog for the version range being crossed,
+# decides whether the bump is actually breaking for THIS repo's usage, and
+# comments on the PR with a verdict. Does not approve or merge.
+#
+# Requires repo secret CLAUDE_CODE_OAUTH_TOKEN. Without it the job is a no-op
+# at the Claude step.
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+# pull_request_target runs the workflow definition from the base branch
+# (main), not the PR branch. That dodges the claude-code-action's own
+# workflow-validation step, which refuses to run if the workflow file
+# differs between main and the PR, Dependabot PRs that touch workflow
+# files (e.g. actions/checkout bumps) would otherwise never get reviewed.
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write  # OIDC token exchange for anthropics/claude-code-action
+
+jobs:
+  review:
+    if: contains(github.event.pull_request.labels.*.name, 'breaking-candidate')
+    runs-on: ubuntu-latest
+    steps:
+      # pull_request_target checks out main by default; override to the PR
+      # head so Claude sees the diff it is reviewing. The code is not
+      # executed here, only read, so there is no privilege-escalation risk.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Claude breaking-change review
+        uses: anthropics/claude-code-action@v1
+        with:
+          # action.yml documents github_token as "optional if using GitHub
+          # App": provide it and the action skips the OIDC+App token
+          # exchange and uses this token for GitHub operations instead.
+          # That removes the Claude GitHub App as a required install step.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The action's default is to refuse to act on PRs opened by bots
+          # (allowed_bots default is empty). Dependabot opens the PRs this
+          # workflow is designed around, so allow it explicitly. This is
+          # safe here because the trigger is a label we add after
+          # inspecting the PR title; a hostile bot cannot label its own PRs.
+          allowed_bots: "dependabot[bot]"
+          prompt: |
+            A Renovate PR tagged `breaking-candidate` just landed on
+            qbittorrent-vpn-docker. Your job is to tell the maintainer
+            whether this is a real breaking change for this repo or just a
+            major-version-number bump with no actual API break for how we
+            use the dep.
+
+            Steps:
+            1. Read the PR diff. Identify the dep and the version range
+               being crossed. The pin lives in `compose.yaml` for images,
+               `.github/workflows/*.yml` for Actions.
+            2. Fetch the upstream project's CHANGELOG, release notes, or
+               Breaking Changes doc for every version in the range. Read
+               UPSTREAMS.md in this repo for which symbols or flags we
+               actually consume.
+            3. For each breaking item the upstream advertises, grep this
+               repo (`compose.yaml`, `.env.example`, `configs/`,
+               `update-qbittorrent.sh`, `README.md`) for the symbol/flag/
+               env/label that would be affected, and determine whether we
+               actually use it. Gluetun deserves extra care: provider
+               wire-protocol changes often arrive as minors.
+            4. Post one PR comment with a one-line verdict (`REAL breaking`,
+               `NOT breaking for our usage`, or `UNCLEAR, needs human`) and
+               a short bulleted list naming each breaking item you checked
+               and whether it affects us. Keep the comment under 400 words.
+
+            Do not approve, request changes, or merge. Comment only.

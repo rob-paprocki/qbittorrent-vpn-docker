@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# platforms/casaos/tests/shims/curl - logs its arguments (so the tests can
+# check that no secret is on a command line), then runs the real curl for
+# CasaOS's API, or tests/lib/fake_apps.py for requests to the apps' web UIs
+# on 127.0.0.1 (what Docker's published ports would answer).
+# License: MIT (see LICENSE in the repository root).
+printf '%q ' "$@" >>"${CASAOS_SHIM_STATE:?}/curl.log"
+printf '\n' >>"${CASAOS_SHIM_STATE}/curl.log"
+for a in "$@"; do
+  if [[ "$a" == http://127.0.0.1:* && "$a" != */v2/app_management* ]]; then
+    exec "${CASAOS_SHIM_SYSTEM_PYTHON:-/usr/bin/python3}" -I "$(dirname "${BASH_SOURCE[0]}")/../lib/fake_apps.py" "$@"
+  fi
+done
+exec /usr/bin/curl "$@"

@@ -1,0 +1,23 @@
+flowchart TD
+  %% How the stack fits together (README, "How it works").
+  %% Source for architecture.svg (and its -light/-dark renders).
+  %% After editing, regenerate them from the repo root: docs/images/render.sh
+  V["VPN provider,<br/>then the internet"]
+  subgraph N["Gluetun's network"]
+    G["Gluetun: VPN<br/>tunnel, firewall.<br/>Publishes 8090,<br/>9117 and 8191"]
+    Q["qBittorrent<br/>with VueTorrent<br/>:8090"]
+    J["Jackett :9117"]
+    F["FlareSolverr<br/>:8191"]
+  end
+  E["env-editor<br/>:9191, on the<br/>host. Edits<br/>.env, restarts<br/>the apps"]
+  B["FileBrowser<br/>:8081, own<br/>network. Shows<br/>the downloads"]
+  V <-->|"only way out"| N
+  G -->|"forwarded<br/>port"| Q
+  Q -->|"search"| J
+  J --> F
+  F ~~~ E
+  F ~~~ B
+  NOTE["Native mode (Proxmox VE,<br/>Incus): the same apps as<br/>systemd units in one Debian<br/>13 container, kept on the VPN<br/>by an nftables kill switch"]:::note
+  E ~~~ NOTE
+  B ~~~ NOTE
+  classDef note stroke-dasharray:4 3

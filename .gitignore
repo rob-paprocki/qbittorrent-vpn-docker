@@ -1,0 +1,49 @@
+# Secrets (VPN keys, qBit password, webhooks).
+.env
+.env.*
+!.env.example
+
+# Download trees.
+/downloads/
+/incomplete/
+
+# Everything under configs/ is runtime state the apps rewrite, only the two
+# tracked seeds are allowed through. Jackett rewrites ServerConfig.json with
+# its APIKey on first start; the tracked file remains the seed template and
+# the live one must stay out of git. Run:
+#   git update-index --skip-worktree configs/jackett/Jackett/ServerConfig.json
+# after the stack is up to stop future `git status` noise on the generated APIKey.
+/configs/*
+!/configs/jackett/
+!/configs/qbittorrent/
+/configs/jackett/*
+!/configs/jackett/Jackett/
+/configs/jackett/Jackett/*
+!/configs/jackett/Jackett/ServerConfig.json
+/configs/qbittorrent/*
+!/configs/qbittorrent/qBittorrent/
+/configs/qbittorrent/qBittorrent/*
+!/configs/qbittorrent/qBittorrent/qBittorrent.conf
+
+# env-editor runtime state: auto-generated admin creds (bcrypt hash) and
+# the Python venv built by scripts/setup.sh. The whole configs/env-editor/
+# tree is runtime-only, nothing in it is checked in.
+/configs/env-editor/
+/scripts/env-editor/.venv/
+/scripts/env-editor/__pycache__/
+/scripts/env-editor/*.pyc
+
+# Editor / OS cruft.
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Python bytecode anywhere in the tree (native/lib, platform test helpers).
+__pycache__/
+*.pyc
+
+# Local word list for the release checks.
+wordlist.local
+.claude/settings.local.json

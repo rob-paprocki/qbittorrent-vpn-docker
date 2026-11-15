@@ -1,0 +1,56 @@
+name: Release
+
+# Runs in the PUBLIC repository when a version tag arrives (or by hand for a
+# tag): builds the download files (source tarball, one installer per platform,
+# SHA256SUMS) and the GitHub release.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build the release for, e.g. v4.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.repository == 'rob-paprocki/qbittorrent-vpn-docker'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Tag must be exactly vX.Y.Z
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "bad tag name"; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests
+        run: python3 -m unittest discover -s tests
+      - name: Build download files
+        run: |
+          VERSION="${TAG#v}"
+          git archive --format=tar.gz --prefix="qbittorrent-vpn-docker-$VERSION/" \
+              -o "qbittorrent-vpn-docker-$VERSION.tar.gz" "$TAG"
+          mkdir dist && mv "qbittorrent-vpn-docker-$VERSION.tar.gz" dist/
+          for p in proxmox incus truenas unraid synology casaos; do
+            cp "platforms/$p/install.sh" "dist/install-$p.sh"
+          done
+          (cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS)
+          python3 scripts/release/changelog.py notes "$VERSION" > notes.md
+          printf '\n---\nEach `install-<platform>.sh` is the installer for that platform. Pass `TS_REF=%s` to install this version instead of `main`. See the platform guides under `platforms/` for the steps.\n' "$TAG" >> notes.md
+      - name: Create GitHub release (skip if it already exists)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; nothing to do"; exit 0
+          fi
+          gh release create "$TAG" dist/* --title "qbittorrent-vpn-docker ${TAG#v}" --notes-file notes.md --verify-tag

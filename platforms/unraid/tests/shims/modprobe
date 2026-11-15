@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# platforms/unraid/tests/shims/modprobe
+#
+# Purpose: test stand-in for modprobe, used by
+# platforms/unraid/tests/run-tests.sh. Records the call; for "tun" it makes
+# /dev/net/tun appear (as loading the kernel module would) unless
+# SHIM_TUN_FAILS=1. Only ever runs inside the test's private mount namespace,
+# where /dev/net is a throwaway folder. The device is the test machine's own
+# tun device bind-mounted into place ($SHIM_TUN_SOURCE), because mknod is not
+# allowed in an unprivileged container.
+#
+# Copyright (c) 2025-2026 Rob Paprocki
+# License: MIT (see LICENSE in the repository root)
+
+set -euo pipefail
+{
+  printf 'modprobe'
+  printf ' %q' "$@"
+  printf '\n'
+} >>"${SHIM_LOG:?}"
+if [[ "${1:-}" == tun && "${SHIM_TUN_FAILS:-0}" != 1 && -n "${SHIM_TUN_SOURCE:-}" ]]; then
+  mkdir -p /dev/net
+  if [[ ! -c /dev/net/tun ]]; then
+    touch /dev/net/tun
+    mount --bind "$SHIM_TUN_SOURCE" /dev/net/tun
+  fi
+  exit 0
+fi
+echo "modprobe: FATAL: Module ${1:-} not found" >&2
+exit 1

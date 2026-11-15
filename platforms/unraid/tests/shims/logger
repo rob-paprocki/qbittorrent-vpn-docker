@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#
+# platforms/unraid/tests/shims/logger
+#
+# Purpose: test stand-in for logger(1), used by
+# platforms/unraid/tests/run-tests.sh. Compose Manager Plus logs to syslog
+# with logger; the test machine has no syslog, so lines go to
+# $SHIM_SYSLOG instead.
+#
+# Copyright (c) 2025-2026 Rob Paprocki
+# License: MIT (see LICENSE in the repository root)
+
+set -euo pipefail
+printf '%s\n' "$*" >>"${SHIM_SYSLOG:-/dev/null}"

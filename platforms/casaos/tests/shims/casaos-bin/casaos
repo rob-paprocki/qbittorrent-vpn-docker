@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# platforms/casaos/tests/shims/casaos-bin/casaos - stand-in for CasaOS's main
+# binary. Only `casaos -v` is used by install.sh; the real one prints
+# "v0.4.15" (CasaOS main.go: fmt.Println("v" + common.VERSION)) and exits.
+# License: MIT (see LICENSE in the repository root).
+[[ "${1:-}" == -v ]] || { echo "casaos shim: only -v is supported" >&2; exit 2; }
+echo "v${CASAOS_SHIM_VERSION:-0.4.15}"

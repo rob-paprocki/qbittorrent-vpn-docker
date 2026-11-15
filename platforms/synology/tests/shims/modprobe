@@ -1,0 +1,5 @@
+#!/bin/bash
+# Test shim for modprobe (platforms/synology/tests): records the call only.
+# Copyright (c) 2025-2026 Rob Paprocki. License: MIT (see LICENSE).
+echo "modprobe $*" >>"${FAKE_SYNO_DIR:-/var/lib/fake-syno}/insmod.calls"
+exit 0

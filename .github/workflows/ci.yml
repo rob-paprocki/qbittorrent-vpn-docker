@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Release tooling tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Personal-value check (emails, IPs, MACs)
+        run: python3 tests/check_repo.py
+      - name: Shell syntax
+        run: |
+          for f in $(git ls-files '*.sh'); do bash -n "$f"; done
+
+  changelog:
+    # Flag visible changes that have no changelog line.
+    if: endsWith(github.repository, '-private')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Changelog check
+        run: python3 scripts/release/changelog_check.py

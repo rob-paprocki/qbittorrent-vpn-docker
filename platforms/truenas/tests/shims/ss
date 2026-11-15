@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# platforms/truenas/tests/shims/ss - stand-in for `ss -Htln`, for testing
+# platforms/truenas/install.sh's port check without the test machine's own
+# listening sockets getting in the way. Lists the TCP ports in the
+# "listening" list of $TN_SHIM_STATE/state.json, in ss's column layout.
+#
+# License: MIT (see LICENSE in the repository root).
+
+set -Eeuo pipefail
+[[ "${1:-}" == -Htln ]] || {
+  echo "ss shim: only -Htln is supported" >&2
+  exit 2
+}
+python3 - "${TN_SHIM_STATE:?}/state.json" <<'PY'
+import json, sys
+for port in json.load(open(sys.argv[1])).get("listening", []):
+    print(f"LISTEN 0      4096         0.0.0.0:{port}      0.0.0.0:*")
+PY
