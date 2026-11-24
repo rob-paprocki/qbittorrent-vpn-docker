@@ -10,6 +10,13 @@ A new major version means an existing install may need manual steps when you upd
 
 ## [Unreleased]
 
+## [4.0.2] - 2026-11-24
+**Upgrading:** nothing to do.
+
+### Fixed
+
+- `SECURITY.md` sends every report through GitHub's private vulnerability reporting, drops the reply deadline and says that only the latest release gets fixes.
+
 ## [4.0.1] - 2026-11-15
 **Upgrading:** nothing to do.
 

@@ -2,13 +2,13 @@
 
 ## Reporting
 
-Open a private [GitHub Security Advisory](https://github.com/rob-paprocki/qbittorrent-vpn-docker/security/advisories/new) on this repository. Expect a first reply inside five business days; this is a hobby repo with one maintainer.
+Use this repository's **Security** tab and choose **Report a vulnerability**. That sends a private report that only I can see, and I'll reply there.
 
-Do not open a public issue for a vulnerability until a fix is released.
+Don't open a public issue for a vulnerability until a fix is released.
 
 ## Supported versions
 
-Only the current `main` branch is supported. Each change rolls forward; there are no backported releases.
+Only the latest release gets fixes. Each change rolls forward; there are no backported releases.
 
 ## Known residual risks
 
