@@ -10,6 +10,13 @@ A new major version means an existing install may need manual steps when you upd
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-11-25
+**Upgrading:** nothing to do.
+
+### Changed
+
+- The README's diagram links to its Mermaid source file in `docs/images/`. The collapsed copy of the source under it is gone.
+
 ## [4.0.2] - 2026-11-24
 **Upgrading:** nothing to do.
 
